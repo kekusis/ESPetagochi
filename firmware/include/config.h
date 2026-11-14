@@ -14,11 +14,11 @@
 #define TFT_RST      42
 #define TFT_BL       -1  // Set to -1 if backlight is always on, or GPIO if controlled
 
-// Pet GIF fills nearly the entire screen (220x148)
-#define PET_GIF_W    220
-#define PET_GIF_H    148
-#define PET_GIF_X    ((LCD_WIDTH - PET_GIF_W) / 2)   // 10
-#define PET_GIF_Y    42                              // Just below status bar (Y: 42 to 190)
+// Full-screen Pet GIF Coordinates (240x152 GIF: stretched across the entire display!)
+#define PET_GIF_W    240
+#define PET_GIF_H    152
+#define PET_GIF_X    0                               // Touches left and right screen borders!
+#define PET_GIF_Y    44                              // Below status bar (Y: 44 to 196)
 
 // ==========================================
 // Hardware Button Pins (Configurable)

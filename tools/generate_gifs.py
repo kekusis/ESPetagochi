@@ -6,13 +6,12 @@ DOWNLOADS_DIR = r"C:\Users\pezda\Downloads"
 OUTPUT_DIR = r"C:\Users\pezda\Desktop\ESPetagochi-main\assets\gifs"
 HEADER_PATH = r"C:\Users\pezda\Desktop\ESPetagochi-main\firmware\include\pet_gifs.h"
 
-# Darker Gray Fur Color (matches 0xB596 in RGB565 -> RGB 180,176,180)
-FUR_COLOR = (180, 180, 180)
-# Threshold: pixels darker than this are treated as "ink" and kept
-INK_THRESHOLD = 60
-OUT_W, OUT_H = 220, 148
+# Darker Gray Fur Color (matches 0x9CD3 in RGB565 -> RGB 155, 155, 155)
+FUR_COLOR = (155, 155, 155)
+# Full screen width and height between HUD bars (240x152)
+OUT_W, OUT_H = 240, 152
 
-def process_frames(src_path, crop_box=(15, 10, 345, 220)):
+def process_frames(src_path, crop_box):
     src = Image.open(src_path)
     frames = []
     durations = []
@@ -28,6 +27,7 @@ def process_frames(src_path, crop_box=(15, 10, 345, 220)):
         pixels = cropped.load()
         
         # 1. Flood-fill outer white background from borders -> FUR_COLOR
+        #    Preserves interior eye highlights/glints completely
         visited = set()
         queue = deque()
         for x in range(w):
@@ -43,21 +43,20 @@ def process_frames(src_path, crop_box=(15, 10, 345, 220)):
                 continue
             visited.add((x, y))
             r, g, b, a = pixels[x, y]
-            if r > 240 and g > 240 and b > 240:
+            if r > 230 and g > 230 and b > 230:
                 pixels[x, y] = (*FUR_COLOR, 255)
                 for nx, ny in [(x+1, y), (x-1, y), (x, y+1), (x, y-1)]:
                     if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited:
                         queue.append((nx, ny))
         
-        # 2. Replace any remaining near-black / transparent pixels with fur color
-        #    (these are the "black background" areas from the GIF)
+        # 2. Replace any transparent or stray background pixels with fur color
         for y in range(h):
             for x in range(w):
                 r, g, b, a = pixels[x, y]
                 if a < 128:
-                    # Transparent -> fur
                     pixels[x, y] = (*FUR_COLOR, 255)
                     
+        # 3. Resize to fill the entire 240x152 display canvas
         resized = cropped.resize((OUT_W, OUT_H), Image.Resampling.NEAREST)
         frames.append(resized.convert('RGB'))
     return frames, durations
@@ -68,15 +67,21 @@ def main():
     
     anims = {}
     
-    # 1. Ingest User's 5 Hand-Drawn Wiggly Paint GIFs
+    # Tight crop boxes so face stretches across the entire screen!
+    crop_standard = (28, 13, 292, 180) # 264x167 -> aspect 1.58
+    crop_hungry = (28, 10, 344, 210)   # Includes thought bubble -> aspect 1.58
+    
+    # 1. Ingest User's Hand-Drawn Wiggly Paint GIFs with full-screen stretch
+    anims['idle'] = process_frames(os.path.join(DOWNLOADS_DIR, "idle.gif"), crop_standard)
+    anims['happy'] = process_frames(os.path.join(DOWNLOADS_DIR, "happy.gif"), crop_standard)
+    anims['hungry'] = process_frames(os.path.join(DOWNLOADS_DIR, "hungry.gif"), crop_hungry)
+    anims['dirty'] = process_frames(os.path.join(DOWNLOADS_DIR, "dirty.gif"), crop_standard)
+    anims['eating'] = process_frames(os.path.join(DOWNLOADS_DIR, "eating.gif"), crop_standard)
+    
     for name in ['idle', 'happy', 'hungry', 'dirty', 'eating']:
-        p = os.path.join(DOWNLOADS_DIR, f"{name}.gif")
-        if not os.path.exists(p):
-            raise FileNotFoundError(f"Missing user file: {p}")
-        anims[name] = process_frames(p)
-        print(f"Loaded {name}.gif from Downloads: {len(anims[name][0])} frames")
+        print(f"Loaded and stretched {name}.gif: {len(anims[name][0])} frames")
         
-    # 2. Derive the 3 remaining animations in the same art style
+    # 2. Derive the 3 remaining animations (sleeping, washing, playing) scaled up
     happy_frames, happy_dur = anims['happy']
     idle_frames, idle_dur = anims['idle']
     
@@ -85,9 +90,9 @@ def main():
     for i in range(4):
         f = happy_frames[i % len(happy_frames)].copy()
         d = ImageDraw.Draw(f)
-        zy = 30 - (i * 4)
-        d.text((170, zy + 8), "z", fill=(100, 120, 180))
-        d.text((182, zy), "Z", fill=(70, 90, 160))
+        zy = 24 - (i * 4)
+        d.text((188, zy + 8), "z", fill=(100, 120, 180))
+        d.text((200, zy), "Z", fill=(70, 90, 160))
         sleep_frames.append(f)
     anims['sleeping'] = (sleep_frames, [300]*4)
     
@@ -96,7 +101,7 @@ def main():
     for i in range(4):
         f = happy_frames[(i*2) % len(happy_frames)].copy()
         d = ImageDraw.Draw(f)
-        for bx, by, r in [(30, 36 + i*3, 14), (180, 30 - i*3, 16), (35, 108, 10), (178, 102, 12)]:
+        for bx, by, r in [(16, 26 + i*3, 14), (206, 20 - i*3, 16), (20, 110, 10), (204, 105, 12)]:
             d.ellipse([bx, by, bx+r, by+r], outline=(80, 180, 240), fill=(160, 215, 245), width=2)
             d.point((bx+3, by+3), fill=(255, 255, 255))
         wash_frames.append(f)
@@ -107,15 +112,15 @@ def main():
     for i in range(6):
         f = idle_frames[i % len(idle_frames)].copy()
         d = ImageDraw.Draw(f)
-        ball_x = 170 + (i * 5)
-        ball_y = 100 - [0, 20, 34, 26, 14, 0][i]
+        ball_x = 195 + (i * 5)
+        ball_y = 105 - [0, 22, 36, 28, 14, 0][i]
         d.ellipse([ball_x-10, ball_y-10, ball_x+10, ball_y+10], fill=(255, 80, 60), outline=(180, 40, 30), width=2)
         play_frames.append(f)
     anims['playing'] = (play_frames, [140]*6)
     
     # 3. Export to assets/gifs and build C header
     header_content = """// Auto-generated pet animations header for ESP32 Tamagotchi
-// User hand-drawn pixel art with darker gray fur background
+// Full-screen stretched hand-drawn character face with darker gray fur
 #pragma once
 #include <Arduino.h>
 

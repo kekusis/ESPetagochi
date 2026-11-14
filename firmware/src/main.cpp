@@ -40,7 +40,7 @@ unsigned long lastSaveTime = 0;
 #define SAVE_INTERVAL_MS 30000 // Auto-save to NVS every 30s
 
 // Color Definitions (RGB565)
-#define COLOR_PET_BG      0xB596  // Darker gray fur (matches GIF fur background: RGB 180, 180, 180)
+#define COLOR_PET_BG      0x9CD3  // Darker gray fur (RGB: 155, 155, 155 - exact match to GIF background)
 #define COLOR_BG          0x18E4  // Dark slate for HUD panels & toolbars
 #define COLOR_WHITE       0xFFFF
 #define COLOR_BLACK       0x0000
@@ -289,8 +289,8 @@ void drawLargeMeter(int x, int y, int w, int h, int val, uint16_t color, const c
 }
 
 void drawStatusBar() {
-    // Header area (Y: 0 to 40)
-    gfx->fillRect(0, 0, LCD_WIDTH, 40, COLOR_BG);
+    // Header stats area on fur background (Y: 0 to 40)
+    gfx->fillRect(0, 0, LCD_WIDTH, 40, COLOR_PET_BG);
     gfx->drawFastHLine(0, 40, LCD_WIDTH, COLOR_BORDER);
 
     // Row 1 (Y: 4): Hunger (H) & Cleanliness (C)
@@ -303,8 +303,8 @@ void drawStatusBar() {
 }
 
 void drawFooter() {
-    // Footer toolbar (Y: 198 to 240)
-    gfx->fillRect(0, 198, LCD_WIDTH, 42, COLOR_BG);
+    // Footer toolbar on fur background (Y: 198 to 240)
+    gfx->fillRect(0, 198, LCD_WIDTH, 42, COLOR_PET_BG);
     gfx->drawFastHLine(0, 198, LCD_WIDTH, COLOR_BORDER);
 
     if (currentMode == MODE_PET) {
@@ -322,8 +322,8 @@ void drawFooter() {
             gfx->setCursor(bx + 7, 205);
             gfx->print(btnNums[i]);
 
-            // Clean action label
-            gfx->setTextColor(COLOR_WHITE);
+            // Clean action label in crisp dark text on fur background
+            gfx->setTextColor(COLOR_BLACK);
             gfx->setTextSize(1);
             gfx->setCursor(bx + 24, 210);
             gfx->print(btnLabels[i]);
@@ -423,7 +423,7 @@ void startFeedGame() {
 
     // Position pet at bottom of screen (large pet face fills screen)
     petDrawX = laneX[petLane] - (PET_GIF_W / 2);
-    petDrawY = 90;
+    petDrawY = 88;
 
     currentTreat.active = false;
     nextTreatSpawnTime = millis() + 300;
@@ -558,8 +558,8 @@ void handleFeedGameInput(int btnIndex) {
 // ==========================================
 // Minigame 2: BUBBLE SCRUB (Flicker-Free, Layered, Large Pet)
 // ==========================================
-const int bubbleCenterX[4] = {48, 192, 56, 184};
-const int bubbleCenterY[4] = {68, 68, 142, 142};
+const int bubbleCenterX[4] = {30, 210, 36, 204};
+const int bubbleCenterY[4] = {65, 65, 142, 142};
 const int bubbleRadius = 18;
 
 void drawWashScore() {
