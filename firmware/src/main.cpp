@@ -185,12 +185,26 @@ void GIFDraw(GIFDRAW *pDraw) {
     static uint16_t lineBuf[LCD_WIDTH];
     
     // Build exclusion spans for this scanline
-    // Max exclusions: 1 bubble + 6 soap spots = 7
+    // Max exclusions: 1 treat + 1 bubble + 6 soap spots = 8
     bool hasOverlayExcl = false;
     int exclX1[8], exclX2[8], numExcl = 0;
 
+    // Feed minigame: exclude treat bounding box so GIF never paints over it (zero flicker!)
+    if (currentMode == MODE_GAME_FEED && currentTreat.active) {
+        int tx1 = currentTreat.x - TREAT_SPRITE_W / 2;
+        int tx2 = currentTreat.x + TREAT_SPRITE_W / 2 - 1;
+        int ty1 = currentTreat.y - TREAT_SPRITE_H / 2;
+        int ty2 = currentTreat.y + TREAT_SPRITE_H / 2 - 1;
+        if (y >= ty1 && y <= ty2) {
+            exclX1[numExcl] = tx1;
+            exclX2[numExcl] = tx2;
+            numExcl++;
+            hasOverlayExcl = true;
+        }
+    }
+
     // Wash minigame: active bubble exclusion
-    if (currentMode == MODE_GAME_WASH && washBubbleActive && !washSpongeShowing) {
+    if (currentMode == MODE_GAME_WASH && washBubbleActive) {
         int bubbleR = 18;
         int dy = abs(y - washBubbleY);
         if (dy <= bubbleR) {
@@ -510,16 +524,6 @@ void startFeedGame() {
 void updateFeedGame() {
     unsigned long now = millis();
 
-    // 1. Keep Pet GIF playing at its current lane position FIRST
-    if (gifLoaded && now >= nextFrameTime) {
-        int iDelay = 0;
-        if (!gif.playFrame(true, &iDelay)) {
-            loadPetGif(pet.overrideEndTime > now ? pet.overrideEmotion : EMOTION_IDLE);
-        } else {
-            nextFrameTime = now + iDelay;
-        }
-    }
-
     // 2. Spawn a new treat with guaranteed variety
     if (!currentTreat.active && feedTreatsSpawned < feedTreatsTotal) {
         if (now >= nextTreatSpawnTime) {
@@ -533,24 +537,33 @@ void updateFeedGame() {
             currentTreat.y = 44;
             currentTreat.prevY = 44;
             currentTreat.type = random(NUM_TREAT_TYPES);
-            // Steady, smooth fall speed (no sudden jump or lag)
-            currentTreat.speed = 8 + (feedTreatsSpawned * 3 / 4);
+            currentTreat.speed = 6 + (feedTreatsSpawned * 2 / 4);
             feedTreatsSpawned++;
             Serial.printf("-> Treat #%d falling in Lane %d! (Speed: %d)\n", feedTreatsSpawned, currentTreat.lane + 1, currentTreat.speed);
         }
     }
 
-    // 3. Animate falling treat ON TOP of pet so it never lags or gets overwritten
+    // 1. Play GIF frame AFTER updating treat position so exclusion zone is current
+    // GIFDraw skips pixels inside the treat bounding box — zero flicker, no erase needed!
+    if (gifLoaded && now >= nextFrameTime) {
+        int iDelay = 0;
+        if (!gif.playFrame(true, &iDelay)) {
+            loadPetGif(pet.overrideEndTime > now ? pet.overrideEmotion : EMOTION_IDLE);
+        } else {
+            nextFrameTime = now + iDelay;
+        }
+    }
+
+    // 3. Move and draw treat on top of GIF
     if (currentTreat.active) {
-        eraseTreat(currentTreat.x, currentTreat.prevY);
-        currentTreat.prevY = currentTreat.y;
         currentTreat.y += currentTreat.speed;
 
         // Catch window: Y = 135 to 165
         if (currentTreat.y >= 135 && currentTreat.y <= 165) {
             if (currentTreat.lane == petLane) {
-                // CAUGHT!
-                eraseTreat(currentTreat.x, currentTreat.y);
+                // CAUGHT! Clear treat area and celebrate
+                gfx->fillRect(currentTreat.x - TREAT_SPRITE_W/2, currentTreat.y - TREAT_SPRITE_H/2,
+                               TREAT_SPRITE_W, TREAT_SPRITE_H, COLOR_PET_BG);
                 currentTreat.active = false;
                 feedScore++;
                 pet.hunger = min(HUNGER_MAX, pet.hunger + 14);
@@ -569,8 +582,10 @@ void updateFeedGame() {
         }
 
         // Miss check
-        if (currentTreat.active && currentTreat.y > 175) {
-            eraseTreat(currentTreat.x, currentTreat.y);
+        if (currentTreat.active && currentTreat.y > 180) {
+            // Clear treat area on miss
+            gfx->fillRect(currentTreat.x - TREAT_SPRITE_W/2, currentTreat.y - TREAT_SPRITE_H/2,
+                           TREAT_SPRITE_W, TREAT_SPRITE_H, COLOR_PET_BG);
             currentTreat.active = false;
             Serial.printf("-> MISSED in Lane %d!\n", currentTreat.lane + 1);
             nextTreatSpawnTime = now + 140;
@@ -600,7 +615,7 @@ void updateFeedGame() {
         return;
     }
 
-    delay(10);
+    delay(8);
 }
 
 void handleFeedGameInput(int btnIndex) {
@@ -654,7 +669,6 @@ void spawnNextWashBubble() {
     washBubbleY = 55 + random(100);  // 55 to 155
     washBubbleBtn = random(4);       // 0-3 (displayed as 1-4)
     washBubbleActive = true;
-    washSpongeShowing = false;
 }
 
 void drawCurrentBubble() {
@@ -679,10 +693,7 @@ void drawCurrentBubble() {
 }
 
 void drawSponge(int x, int y) {
-    // Draw sponge bitmap sprite centered at x, y
-    int drawX = x - SPONGE_SPRITE_W / 2;
-    int drawY = y - SPONGE_SPRITE_H / 2;
-    gfx->draw16bitRGBBitmap(drawX, drawY, sponge_sprite, SPONGE_SPRITE_W, SPONGE_SPRITE_H);
+    // Removed — sponge no longer shown
 }
 
 void startWashGame() {
@@ -718,6 +729,7 @@ void updateWashGame() {
     unsigned long now = millis();
 
     // 1. Keep Pet GIF playing (dirty animation)
+    // GIFDraw exclusion zones protect the active bubble and all soap spots
     if (gifLoaded && now >= nextFrameTime) {
         int iDelay = 0;
         if (!gif.playFrame(true, &iDelay)) {
@@ -727,26 +739,42 @@ void updateWashGame() {
         }
     }
     
-    // 2. Handle sponge display timer
-    if (washSpongeShowing && now >= washSpongeUntil) {
-        washSpongeShowing = false;
+    // 2. Redraw current bubble and soap spots on top of GIF
+    if (washBubbleActive) {
+        drawCurrentBubble();
+    }
+    drawSoapSpots();
+
+    delay(10);
+}
+
+void handleWashGameInput(int btnIndex) {
+    if (!washBubbleActive) return;
+    if (btnIndex < 0 || btnIndex > 3) return;
+    
+    if (btnIndex == washBubbleBtn) {
+        // Correct! Pop the bubble
+        washBubbleActive = false;
+        washScore++;
         
-        // Leave soap residue at the cleaned spot
-        washSoapSpots[washCurrentBubble - 1].x = washSpongeX;
-        washSoapSpots[washCurrentBubble - 1].y = washSpongeY;
-        washSoapSpots[washCurrentBubble - 1].active = true;
+        // Record soap spot at bubble position (exclusion zone will keep it visible)
+        washSoapSpots[washCurrentBubble].x = washBubbleX;
+        washSoapSpots[washCurrentBubble].y = washBubbleY;
+        washSoapSpots[washCurrentBubble].active = true;
         
-        // Clear sponge area
-        gfx->fillRect(washSpongeX - SPONGE_SPRITE_W/2 - 2, washSpongeY - SPONGE_SPRITE_H/2 - 2,
-                       SPONGE_SPRITE_W + 4, SPONGE_SPRITE_H + 4, COLOR_PET_BG);
+        washCurrentBubble++;
         
-        // Re-render a GIF frame to fill the cleared area
-        gif.playFrame(true, NULL);
+        // Clear the bubble area (soap spot exclusion in GIFDraw keeps soap visible)
+        gfx->fillCircle(washBubbleX, washBubbleY, 22, COLOR_PET_BG);
         
-        // Draw all soap spots
+        // Draw soap spot immediately
         drawSoapSpots();
+        drawWashScore();
         
-        // Check if game complete
+        Serial.printf("-> POPPED Bubble %d! (btn %d) (%d/%d done)\n", 
+                       washCurrentBubble, btnIndex + 1, washScore, washTotalBubbles);
+
+        // Check game complete
         if (washCurrentBubble >= washTotalBubbles) {
             delay(300);
             pet.cleanliness = min(CLEANLINESS_MAX, pet.cleanliness + 50);
@@ -767,46 +795,8 @@ void updateWashGame() {
         // Spawn next bubble
         spawnNextWashBubble();
         drawCurrentBubble();
-    }
-    
-    // 3. Redraw current bubble and sponge on top of GIF
-    if (washBubbleActive && !washSpongeShowing) {
-        drawCurrentBubble();
-    }
-    if (washSpongeShowing) {
-        drawSponge(washSpongeX, washSpongeY);
-    }
-    drawSoapSpots();
-
-    delay(10);
-}
-
-void handleWashGameInput(int btnIndex) {
-    if (!washBubbleActive || washSpongeShowing) return;
-    if (btnIndex < 0 || btnIndex > 3) return;
-    
-    if (btnIndex == washBubbleBtn) {
-        // Correct button! Pop the bubble!
-        washBubbleActive = false;
-        washScore++;
-        washCurrentBubble++;
-        
-        // Clear bubble area
-        gfx->fillCircle(washBubbleX, washBubbleY, 22, COLOR_PET_BG);
-        
-        // Show sponge at bubble position
-        washSpongeShowing = true;
-        washSpongeUntil = millis() + 400;
-        washSpongeX = washBubbleX;
-        washSpongeY = washBubbleY;
-        drawSponge(washSpongeX, washSpongeY);
-        
-        drawWashScore();
-        
-        Serial.printf("-> POPPED Bubble %d! (btn %d) (%d/%d done)\n", 
-                       washCurrentBubble, btnIndex + 1, washScore, washTotalBubbles);
     } else {
-        // Wrong button — flash indicator
+        // Wrong button — flash red ring
         gfx->drawCircle(washBubbleX, washBubbleY, 20, COLOR_RED);
         delay(80);
         drawCurrentBubble(); // Redraw normal

@@ -31,7 +31,7 @@ FOOD_IMAGES = [
 
 SPONGE_IMAGE = ("media_1794706699446_95b57b7b.png", "sponge")
 
-TREAT_W, TREAT_H = 24, 24
+TREAT_W, TREAT_H = 32, 32
 SPONGE_W, SPONGE_H = 20, 14
 
 def rgb_to_rgb565(r, g, b):
