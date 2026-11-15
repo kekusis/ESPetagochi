@@ -543,8 +543,21 @@ void updateFeedGame() {
         }
     }
 
-    // 1. Play GIF frame AFTER updating treat position so exclusion zone is current
-    // GIFDraw skips pixels inside the treat bounding box — zero flicker, no erase needed!
+    // 3. Erase old treat position with fur color BEFORE moving
+    // This clears the trail. The GIF exclusion zone then moves to the new position,
+    // so the GIF naturally repaints the erased area on the next frame.
+    if (currentTreat.active) {
+        // Erase old sprite footprint with fur color
+        int eraseTop = max(37, currentTreat.y - TREAT_SPRITE_H / 2);
+        int eraseBot = min(LCD_HEIGHT, currentTreat.y + TREAT_SPRITE_H / 2);
+        gfx->fillRect(currentTreat.x - TREAT_SPRITE_W / 2, eraseTop,
+                      TREAT_SPRITE_W, eraseBot - eraseTop, COLOR_PET_BG);
+        currentTreat.prevY = currentTreat.y;
+        currentTreat.y += currentTreat.speed;
+    }
+
+    // 1. Play GIF frame AFTER erasing and moving — exclusion zone now at new Y,
+    // GIF repaints the erased old area cleanly.
     if (gifLoaded && now >= nextFrameTime) {
         int iDelay = 0;
         if (!gif.playFrame(true, &iDelay)) {
@@ -554,11 +567,9 @@ void updateFeedGame() {
         }
     }
 
-    // 3. Move and draw treat on top of GIF
+    // 4. Draw treat at new position on top of GIF (exclusion zone keeps it flicker-free)
     if (currentTreat.active) {
-        currentTreat.y += currentTreat.speed;
-
-        // Catch window: Y = 135 to 165
+        // Catch window
         if (currentTreat.y >= 135 && currentTreat.y <= 165) {
             if (currentTreat.lane == petLane) {
                 // CAUGHT! Clear treat area and celebrate
@@ -583,7 +594,6 @@ void updateFeedGame() {
 
         // Miss check
         if (currentTreat.active && currentTreat.y > 180) {
-            // Clear treat area on miss
             gfx->fillRect(currentTreat.x - TREAT_SPRITE_W/2, currentTreat.y - TREAT_SPRITE_H/2,
                            TREAT_SPRITE_W, TREAT_SPRITE_H, COLOR_PET_BG);
             currentTreat.active = false;
@@ -596,7 +606,7 @@ void updateFeedGame() {
         }
     }
 
-    // 4. Check if game finished
+    // 5. Check if game finished
     if (!currentTreat.active && feedTreatsSpawned >= feedTreatsTotal) {
         delay(400);
         currentMode = MODE_PET;
@@ -764,10 +774,14 @@ void handleWashGameInput(int btnIndex) {
         
         washCurrentBubble++;
         
-        // Clear the bubble area (soap spot exclusion in GIFDraw keeps soap visible)
+        // Clear the bubble area with fur color
         gfx->fillCircle(washBubbleX, washBubbleY, 22, COLOR_PET_BG);
         
-        // Draw soap spot immediately
+        // Immediately force a GIF frame to repaint under where the bubble was,
+        // BEFORE the soap spot exclusion kicks in — no gray gap!
+        gif.playFrame(true, NULL);
+        
+        // Draw soap spot on top of freshly repainted GIF
         drawSoapSpots();
         drawWashScore();
         
@@ -912,16 +926,15 @@ void updatePlayGame() {
     }
 
     // 4. Large arrows pointing left/right (drawn on fur, excluded in GIFDraw so zero Z-fight)
+    // The GIF naturally repaints the non-excluded side — no explicit fillRect needed!
     if (playTargetDir == 0) {
         // Arrow LEFT on left side of pet
         gfx->fillTriangle(8, 108, 38, 86, 38, 130, COLOR_HAPPY);
         gfx->fillRect(38, 98, 14, 20, COLOR_HAPPY);
-        gfx->fillRect(186, 84, 50, 48, COLOR_PET_BG); // Clear right
     } else {
         // Arrow RIGHT on right side of pet
         gfx->fillTriangle(232, 108, 202, 86, 202, 130, COLOR_HAPPY);
         gfx->fillRect(188, 98, 14, 20, COLOR_HAPPY);
-        gfx->fillRect(6, 84, 50, 48, COLOR_PET_BG); // Clear left
     }
 
     // Bottom round status in TextSize 2
