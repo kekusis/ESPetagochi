@@ -300,9 +300,8 @@ void drawLargeMeter(int x, int y, int w, int h, int val, uint16_t color, const c
 }
 
 void drawStatusBar() {
-    // Header stats area on fur background (Y: 0 to 40)
+    // Header stats area on fur background (Y: 0 to 40) - seamless, no split line!
     gfx->fillRect(0, 0, LCD_WIDTH, 40, COLOR_PET_BG);
-    gfx->drawFastHLine(0, 40, LCD_WIDTH, COLOR_BORDER);
 
     // Row 1 (Y: 4): Hunger (H) & Cleanliness (C)
     drawLargeMeter(4, 4, 112, 12, pet.hunger, COLOR_HUNGER, "H");
@@ -314,9 +313,8 @@ void drawStatusBar() {
 }
 
 void drawFooter() {
-    // Footer toolbar on fur background (Y: 198 to 240)
+    // Footer toolbar on fur background (Y: 198 to 240) - seamless, no split line!
     gfx->fillRect(0, 198, LCD_WIDTH, 42, COLOR_PET_BG);
-    gfx->drawFastHLine(0, 198, LCD_WIDTH, COLOR_BORDER);
 
     if (currentMode == MODE_PET) {
         const char *btnNums[4] = {"1", "2", "3", "4"};
@@ -972,22 +970,64 @@ void handleSerialCommands() {
             Serial.println("State saved to NVS.");
         } else if (cmd == "help" || cmd == "?") {
             printSerialHelp();
+        } else if (cmd.startsWith("anim ") || cmd.startsWith("ANIM ")) {
+            String animName = cmd.substring(5);
+            animName.trim();
+            animName.toLowerCase();
+            PetEmotion emo = EMOTION_IDLE;
+            if (animName == "happy") emo = EMOTION_HAPPY;
+            else if (animName == "hungry") emo = EMOTION_HUNGRY;
+            else if (animName == "dirty") emo = EMOTION_DIRTY;
+            else if (animName == "eating" || animName == "eat") emo = EMOTION_EATING;
+            else if (animName == "sleeping" || animName == "sleep") emo = EMOTION_SLEEPING;
+            else if (animName == "washing" || animName == "wash") emo = EMOTION_WASHING;
+            else if (animName == "playing" || animName == "play") emo = EMOTION_PLAYING;
+            else emo = EMOTION_IDLE;
+
+            currentMode = MODE_PET;
+            petDrawX = PET_GIF_X;
+            petDrawY = PET_GIF_Y;
+            pet.triggerEmotionOverride(emo, 20000); // Override for 20s
+            loadPetGif(emo);
+            drawPetScreen(true);
+            Serial.printf("Playing animation: %s\n", animName.c_str());
+            printPetStatusSerial();
+        } else if (cmd.startsWith("set stats ")) {
+            int h, c, p, e;
+            if (sscanf(cmd.substring(10).c_str(), "%d %d %d %d", &h, &c, &p, &e) == 4) {
+                pet.hunger = constrain(h, 0, 100);
+                pet.cleanliness = constrain(c, 0, 100);
+                pet.happiness = constrain(p, 0, 100);
+                pet.energy = constrain(e, 0, 100);
+                savePetState();
+                drawPetScreen(true);
+                Serial.printf("Stats updated -> H:%d C:%d P:%d E:%d\n", pet.hunger, pet.cleanliness, pet.happiness, pet.energy);
+                printPetStatusSerial();
+            }
         } else if (cmd.startsWith("set hunger ")) {
             pet.hunger = constrain(cmd.substring(11).toInt(), 0, 100);
             savePetState();
+            drawPetScreen(true);
             Serial.printf("Hunger set to %d\n", pet.hunger);
+            printPetStatusSerial();
         } else if (cmd.startsWith("set clean ")) {
             pet.cleanliness = constrain(cmd.substring(10).toInt(), 0, 100);
             savePetState();
+            drawPetScreen(true);
             Serial.printf("Cleanliness set to %d\n", pet.cleanliness);
+            printPetStatusSerial();
         } else if (cmd.startsWith("set happy ")) {
             pet.happiness = constrain(cmd.substring(10).toInt(), 0, 100);
             savePetState();
+            drawPetScreen(true);
             Serial.printf("Happiness set to %d\n", pet.happiness);
+            printPetStatusSerial();
         } else if (cmd.startsWith("set energy ")) {
             pet.energy = constrain(cmd.substring(11).toInt(), 0, 100);
             savePetState();
+            drawPetScreen(true);
             Serial.printf("Energy set to %d\n", pet.energy);
+            printPetStatusSerial();
         } else {
             Serial.printf("Unknown command: '%s'. Type 'help' for options.\n", cmd.c_str());
         }
