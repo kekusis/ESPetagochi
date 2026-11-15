@@ -41,7 +41,7 @@ struct Pet {
     unsigned long lastEnergyRegen;
     unsigned long nextIdleActionTime;
     
-    char statusMsg[32];
+    char statusMsg[48];
     unsigned long statusMsgEndTime;
 
     void init() {
@@ -69,6 +69,24 @@ struct Pet {
         strncpy(statusMsg, msg, sizeof(statusMsg) - 1);
         statusMsg[sizeof(statusMsg) - 1] = '\0';
         statusMsgEndTime = millis() + durationMs;
+    }
+
+    // Cute love messages for idle display
+    static const char* loveMessage(int idx) {
+        static const char* const msgs[] = {
+            "hey girlfriend!",
+            "i love you sasha",
+            "text me \"i love you\"!11",
+            "feeling alright 2day?",
+            "XD",
+            "ure 2 cute!",
+            "i love you waffle",
+            "<3",
+            "ure the best girl!",
+            "qt3.14",
+            "im ur pancake"
+        };
+        return msgs[idx % 11];
     }
 
     void triggerEmotionOverride(PetEmotion emotion, unsigned long durationMs) {
@@ -139,19 +157,22 @@ struct Pet {
             }
         }
 
-        // Random idle quirks when healthy (rare overrides so idle plays most of the time)
+        // Random idle quirks + love messages when healthy
         if (!isSleeping && overrideEndTime <= now && now >= nextIdleActionTime) {
             nextIdleActionTime = now + random(IDLE_ACTION_MIN_MS, IDLE_ACTION_MAX_MS);
             if (hunger > 40 && cleanliness > 40 && energy > 30) {
-                int r = random(5); // 1-in-5 chance for an override, idle stays 60%+ of the time
+                int r = random(10);
                 if (r == 0) {
                     triggerEmotionOverride(EMOTION_HAPPY, 2500);
                     setStatus("*wiggle wiggle*", 2500);
                 } else if (r == 1) {
                     triggerEmotionOverride(EMOTION_PLAYING, 2500);
                     setStatus("*doing tricks*", 2500);
+                } else if (r >= 2 && r <= 5) {
+                    // Love message (no emotion change, just text)
+                    setStatus(loveMessage(random(11)), 4000);
                 }
-                // r == 2, 3, 4 → stays idle (no override)
+                // r == 6..9 → stays idle (no override, no message)
             }
         }
 

@@ -7,6 +7,7 @@
 
 #include "config.h"
 #include "pet_gifs.h"
+#include "treat_sprites.h"
 #include "PetState.h"
 
 // ==========================================
@@ -84,7 +85,7 @@ struct FallingTreat {
     int x;
     int y;
     int prevY;
-    int type; // 0=Apple, 1=Cookie, 2=Berry
+    int type; // 0 to NUM_TREAT_TYPES-1 (14 food sprites)
     int speed;
 };
 
@@ -94,12 +95,24 @@ int feedTreatsSpawned = 0;
 int feedScore = 0;
 unsigned long nextTreatSpawnTime = 0;
 
-// Wash Game (Bubble Scrub)
-const int bubbleCenterX[4] = {30, 210, 36, 204};
-const int bubbleCenterY[4] = {65, 65, 142, 142};
-const int bubbleRadius = 18;
-bool washBubbles[4] = {true, true, true, true};
-int washBubblesLeft = 4;
+// Wash Game (Sequential Bubble Pop with Sponge)
+int washTotalBubbles = 6;
+int washCurrentBubble = 0;  // Which bubble we're on (0-5)
+int washBubbleX = 0;        // Current bubble position
+int washBubbleY = 0;
+int washBubbleBtn = 0;      // Required button (0-3, displayed as 1-4)
+bool washBubbleActive = false;
+bool washSpongeShowing = false;
+unsigned long washSpongeUntil = 0;
+int washSpongeX = 0;
+int washSpongeY = 0;
+// Soap residue spots left after cleaning
+struct SoapSpot {
+    int x, y;
+    bool active;
+};
+SoapSpot washSoapSpots[6];
+int washScore = 0;
 
 // Play Game (Direction Match)
 int playTargetDir = 0; // 0 = Left (Btn 1), 1 = Right (Btn 2)
@@ -135,7 +148,6 @@ void startWashGame();
 void updateWashGame();
 void handleWashGameInput(int btnIndex);
 void drawWashScore();
-void drawWashBubbles();
 
 void startPlayGame();
 void updatePlayGame();
@@ -168,22 +180,19 @@ void GIFDraw(GIFDRAW *pDraw) {
 
     static uint16_t lineBuf[LCD_WIDTH];
     
-    // In wash minigame, calculate active bubble exclusion spans for this scanline 'y'
-    // By skipping bubble pixels during GIF rendering, the bubbles never get erased and NEVER flicker!
+    // In wash minigame, calculate active bubble exclusion span for this scanline 'y'
+    // Single bubble at a time — skip its pixels so GIF never overwrites it
     bool hasBubbleExcl = false;
-    int exclX1[4], exclX2[4], numExcl = 0;
-    if (currentMode == MODE_GAME_WASH) {
-        for (int b = 0; b < 4; b++) {
-            if (washBubbles[b]) {
-                int dy = abs(y - bubbleCenterY[b]);
-                if (dy <= bubbleRadius) {
-                    int dx = sqrt(bubbleRadius * bubbleRadius - dy * dy);
-                    exclX1[numExcl] = bubbleCenterX[b] - dx;
-                    exclX2[numExcl] = bubbleCenterX[b] + dx;
-                    numExcl++;
-                    hasBubbleExcl = true;
-                }
-            }
+    int exclX1[1], exclX2[1], numExcl = 0;
+    if (currentMode == MODE_GAME_WASH && washBubbleActive && !washSpongeShowing) {
+        int bubbleR = 18;
+        int dy = abs(y - washBubbleY);
+        if (dy <= bubbleR) {
+            int dx = sqrt(bubbleR * bubbleR - dy * dy);
+            exclX1[0] = washBubbleX - dx;
+            exclX2[0] = washBubbleX + dx;
+            numExcl = 1;
+            hasBubbleExcl = true;
         }
     }
 
@@ -383,26 +392,16 @@ void drawFooter() {
 }
 
 void drawSpeechBubble() {
-    // Y: 192 to 196 (just below pet GIF, above footer)
-    gfx->fillRect(4, 192, LCD_WIDTH - 8, 5, COLOR_PET_BG);
+    // Y: 192 to 200 (just below pet GIF, above footer)
+    gfx->fillRect(4, 192, LCD_WIDTH - 8, 8, COLOR_PET_BG);
     if (millis() < pet.statusMsgEndTime && strlen(pet.statusMsg) > 0) {
-        // Overlay speech text on the bottom of the pet area
         int len = strlen(pet.statusMsg);
-        if (len <= 16) {
-            gfx->setTextColor(COLOR_BLACK);
-            gfx->setTextSize(1);
-            int textW = len * 6;
-            int tx = max(12, (LCD_WIDTH - textW) / 2);
-            gfx->setCursor(tx, 192);
-            gfx->print(pet.statusMsg);
-        } else {
-            gfx->setTextColor(COLOR_BLACK);
-            gfx->setTextSize(1);
-            int textW = len * 6;
-            int tx = max(12, (LCD_WIDTH - textW) / 2);
-            gfx->setCursor(tx, 192);
-            gfx->print(pet.statusMsg);
-        }
+        gfx->setTextColor(COLOR_BLACK);
+        gfx->setTextSize(1);
+        int textW = len * 6;
+        int tx = max(4, (LCD_WIDTH - textW) / 2);
+        gfx->setCursor(tx, 192);
+        gfx->print(pet.statusMsg);
     }
 }
 
@@ -433,31 +432,25 @@ void drawFeedScore() {
 
 void drawTreat(int x, int y, int type) {
     if (y < 42) return; // Never render over the header boundary
-    if (type == 0) {
-        // Red Apple
-        gfx->fillCircle(x, y, 7, COLOR_RED);
-        gfx->drawFastVLine(x, y - 8, 3, 0x8A22); // Brown stem
-        gfx->drawPixel(x + 1, y - 7, COLOR_ACCENT); // Green leaf
-    } else if (type == 1) {
-        // Golden Cookie
-        gfx->fillCircle(x, y, 7, 0xFEA0);
-        gfx->drawPixel(x - 2, y - 1, 0x6180);
-        gfx->drawPixel(x + 2, y + 1, 0x6180);
-        gfx->drawPixel(x, y + 2, 0x6180);
-    } else {
-        // Strawberry
-        gfx->fillTriangle(x - 6, y - 3, x + 6, y - 3, x, y + 7, 0xF948);
-        gfx->drawFastHLine(x - 3, y - 4, 7, COLOR_ACCENT);
-    }
+    // Draw bitmap sprite from PROGMEM treat array
+    int spriteIdx = constrain(type, 0, NUM_TREAT_TYPES - 1);
+    const uint16_t *spriteData = (const uint16_t *)pgm_read_ptr(&treat_sprites[spriteIdx]);
+    int drawX = x - TREAT_SPRITE_W / 2;
+    int drawY = y - TREAT_SPRITE_H / 2;
+    gfx->draw16bitRGBBitmap(drawX, drawY, spriteData, TREAT_SPRITE_W, TREAT_SPRITE_H);
 }
 
 void eraseTreat(int x, int y) {
-    // Strictly erase between the header boundary (Y > 36) and down to screen bottom
-    // Erases with COLOR_PET_BG (fur color) so food moves cleanly across the fur!
-    int top = max(37, y - 9);
-    int bottom = min(LCD_HEIGHT, y + 10);
+    // Erase the full sprite area (16x16 centered on x,y) plus 2px margin
+    int drawX = x - TREAT_SPRITE_W / 2 - 1;
+    int drawY = y - TREAT_SPRITE_H / 2 - 1;
+    int eraseW = TREAT_SPRITE_W + 2;
+    int eraseH = TREAT_SPRITE_H + 2;
+    // Clamp to below header boundary
+    int top = max(37, drawY);
+    int bottom = min(LCD_HEIGHT, drawY + eraseH);
     if (bottom > top) {
-        gfx->fillRect(x - 9, top, 19, bottom - top, COLOR_PET_BG);
+        gfx->fillRect(drawX, top, eraseW, bottom - top, COLOR_PET_BG);
     }
 }
 
@@ -516,7 +509,7 @@ void updateFeedGame() {
             currentTreat.x = laneX[currentTreat.lane];
             currentTreat.y = 44;
             currentTreat.prevY = 44;
-            currentTreat.type = random(3);
+            currentTreat.type = random(NUM_TREAT_TYPES);
             // Steady, smooth fall speed (no sudden jump or lag)
             currentTreat.speed = 8 + (feedTreatsSpawned * 3 / 4);
             feedTreatsSpawned++;
@@ -542,8 +535,9 @@ void updateFeedGame() {
 
                 drawFeedScore();
 
-                loadPetGif(EMOTION_EATING);
-                pet.triggerEmotionOverride(EMOTION_EATING, 700);
+                // Brief happy flash on catch!
+                loadPetGif(EMOTION_HAPPY);
+                pet.triggerEmotionOverride(EMOTION_HAPPY, 450);
                 gif.playFrame(true, NULL);
 
                 Serial.printf("-> YUM! Caught in Lane %d! Score: %d/%d\n", petLane + 1, feedScore, feedTreatsTotal);
@@ -605,65 +599,102 @@ void handleFeedGameInput(int btnIndex) {
 }
 
 // ==========================================
-// Minigame 2: BUBBLE SCRUB (Zero-Flicker Hardware Exclusion, Large Pet)
+// Minigame 2: SEQUENTIAL BUBBLE POP (6 bubbles, sponge effect, soap residue)
 // ==========================================
 void drawWashScore() {
     gfx->fillRect(0, 0, LCD_WIDTH, 36, COLOR_BG);
     gfx->drawFastHLine(0, 36, LCD_WIDTH, COLOR_BORDER);
     gfx->setTextColor(COLOR_CLEAN);
     gfx->setTextSize(2);
-    // Center "BUBBLES: X / 4"
-    gfx->setCursor(34, 10);
-    gfx->printf("BUBBLES: %d / 4", washBubblesLeft);
+    gfx->setCursor(22, 10);
+    gfx->printf("SCRUB: %d / %d", washScore, washTotalBubbles);
 }
 
-void drawWashBubbles() {
-    for (int i = 0; i < 4; i++) {
-        if (washBubbles[i]) {
-            int cx = bubbleCenterX[i];
-            int cy = bubbleCenterY[i];
-            int r = bubbleRadius;
-
-            // Outer bubble rim
-            gfx->drawCircle(cx, cy, r, COLOR_CLEAN);
-            // Translucent soapy wash fill
-            gfx->fillCircle(cx, cy, r - 2, 0x2A9C);
-            // Bright white reflection glint
-            gfx->fillCircle(cx - 5, cy - 5, 3, COLOR_WHITE);
-
-            // Large bold button number in TextSize 2
-            gfx->setTextColor(COLOR_WHITE);
-            gfx->setTextSize(2);
-            gfx->setCursor(cx - 5, cy - 7);
-            gfx->printf("%d", i + 1);
+void drawSoapSpots() {
+    // Draw all soap residue spots (light blue bubbly circles)
+    for (int i = 0; i < washTotalBubbles; i++) {
+        if (washSoapSpots[i].active) {
+            int sx = washSoapSpots[i].x;
+            int sy = washSoapSpots[i].y;
+            gfx->fillCircle(sx, sy, 8, 0xAEFC);  // Light bubbly blue
+            gfx->fillCircle(sx - 3, sy - 2, 2, COLOR_WHITE); // Soap glint
+            gfx->fillCircle(sx + 4, sy + 3, 1, COLOR_WHITE);
         }
     }
 }
 
+void spawnNextWashBubble() {
+    if (washCurrentBubble >= washTotalBubbles) return;
+    
+    // Random position in the play area (avoid header and edges)
+    washBubbleX = 30 + random(180);  // 30 to 210
+    washBubbleY = 55 + random(100);  // 55 to 155
+    washBubbleBtn = random(4);       // 0-3 (displayed as 1-4)
+    washBubbleActive = true;
+    washSpongeShowing = false;
+}
+
+void drawCurrentBubble() {
+    if (!washBubbleActive) return;
+    
+    int cx = washBubbleX;
+    int cy = washBubbleY;
+    int r = 18;
+    
+    // Outer bubble rim
+    gfx->drawCircle(cx, cy, r, COLOR_CLEAN);
+    // Soapy fill
+    gfx->fillCircle(cx, cy, r - 2, 0x2A9C);
+    // White glint
+    gfx->fillCircle(cx - 5, cy - 5, 3, COLOR_WHITE);
+    
+    // Large bold button number
+    gfx->setTextColor(COLOR_WHITE);
+    gfx->setTextSize(2);
+    gfx->setCursor(cx - 5, cy - 7);
+    gfx->printf("%d", washBubbleBtn + 1);
+}
+
+void drawSponge(int x, int y) {
+    // Draw sponge bitmap sprite centered at x, y
+    int drawX = x - SPONGE_SPRITE_W / 2;
+    int drawY = y - SPONGE_SPRITE_H / 2;
+    gfx->draw16bitRGBBitmap(drawX, drawY, sponge_sprite, SPONGE_SPRITE_W, SPONGE_SPRITE_H);
+}
+
 void startWashGame() {
     currentMode = MODE_GAME_WASH;
-    washBubblesLeft = 4;
-    for (int i = 0; i < 4; i++) washBubbles[i] = true;
+    washTotalBubbles = 6;
+    washCurrentBubble = 0;
+    washScore = 0;
+    washBubbleActive = false;
+    washSpongeShowing = false;
+    
+    for (int i = 0; i < 6; i++) {
+        washSoapSpots[i].active = false;
+    }
 
     petDrawX = PET_GIF_X;
     petDrawY = PET_GIF_Y;
 
-    gfx->fillScreen(COLOR_PET_BG); // Light gray fur background!
+    gfx->fillScreen(COLOR_PET_BG);
     drawWashScore();
 
     loadPetGif(EMOTION_DIRTY);
     gif.playFrame(true, NULL);
-    drawWashBubbles();
+    
+    // Spawn first bubble
+    spawnNextWashBubble();
+    drawCurrentBubble();
 
-    Serial.println("\n>>> MINIGAME: WASHING STARTED <<<");
-    Serial.println("Kekusis is covered in bubbles! Press [1], [2], [3], [4] to scrub all spots off!");
+    Serial.println("\n>>> MINIGAME: BUBBLE SCRUB STARTED <<<");
+    Serial.println("Pop 6 bubbles! Press the matching button [1-4] to scrub each one!");
 }
 
 void updateWashGame() {
     unsigned long now = millis();
 
-    // 1. Keep Pet GIF playing in the center!
-    // GIFDraw automatically skips active bubble regions so they NEVER flicker!
+    // 1. Keep Pet GIF playing (dirty animation)
     if (gifLoaded && now >= nextFrameTime) {
         int iDelay = 0;
         if (!gif.playFrame(true, &iDelay)) {
@@ -672,50 +703,91 @@ void updateWashGame() {
             nextFrameTime = now + iDelay;
         }
     }
+    
+    // 2. Handle sponge display timer
+    if (washSpongeShowing && now >= washSpongeUntil) {
+        washSpongeShowing = false;
+        
+        // Leave soap residue at the cleaned spot
+        washSoapSpots[washCurrentBubble - 1].x = washSpongeX;
+        washSoapSpots[washCurrentBubble - 1].y = washSpongeY;
+        washSoapSpots[washCurrentBubble - 1].active = true;
+        
+        // Clear sponge area
+        gfx->fillRect(washSpongeX - SPONGE_SPRITE_W/2 - 2, washSpongeY - SPONGE_SPRITE_H/2 - 2,
+                       SPONGE_SPRITE_W + 4, SPONGE_SPRITE_H + 4, COLOR_PET_BG);
+        
+        // Re-render a GIF frame to fill the cleared area
+        gif.playFrame(true, NULL);
+        
+        // Draw all soap spots
+        drawSoapSpots();
+        
+        // Check if game complete
+        if (washCurrentBubble >= washTotalBubbles) {
+            delay(300);
+            pet.cleanliness = min(CLEANLINESS_MAX, pet.cleanliness + 50);
+            pet.happiness = min(HAPPINESS_MAX, pet.happiness + 20);
+            currentMode = MODE_PET;
+            petDrawX = PET_GIF_X;
+            petDrawY = PET_GIF_Y;
+
+            pet.triggerEmotionOverride(EMOTION_WASHING, 4000);
+            pet.setStatus("Squeaky clean!", 3500);
+            drawPetScreen(true);
+            loadPetGif(EMOTION_WASHING);
+            savePetState();
+            printPetStatusSerial();
+            return;
+        }
+        
+        // Spawn next bubble
+        spawnNextWashBubble();
+        drawCurrentBubble();
+    }
+    
+    // 3. Redraw current bubble and sponge on top of GIF
+    if (washBubbleActive && !washSpongeShowing) {
+        drawCurrentBubble();
+    }
+    if (washSpongeShowing) {
+        drawSponge(washSpongeX, washSpongeY);
+    }
+    drawSoapSpots();
 
     delay(10);
 }
 
 void handleWashGameInput(int btnIndex) {
-    if (btnIndex >= 0 && btnIndex < 4) {
-        if (washBubbles[btnIndex]) {
-            washBubbles[btnIndex] = false;
-            washBubblesLeft--;
-
-            // Pop effect
-            int cx = bubbleCenterX[btnIndex];
-            int cy = bubbleCenterY[btnIndex];
-            int r = bubbleRadius;
-
-            // Flash expanding pop ring
-            gfx->drawCircle(cx, cy, r + 4, COLOR_WHITE);
-            delay(50);
-            gfx->drawCircle(cx, cy, r + 4, COLOR_PET_BG);
-
-            // Re-render current frame so the popped bubble area is restored to pet skin
-            gif.playFrame(true, NULL);
-            drawWashBubbles();
-
-            // Update header
-            drawWashScore();
-
-            Serial.printf("-> POPPED Bubble %d! (%d remaining)\n", btnIndex + 1, washBubblesLeft);
-        }
-    }
-
-    if (washBubblesLeft <= 0) {
-        pet.cleanliness = min(CLEANLINESS_MAX, pet.cleanliness + 50);
-        pet.happiness = min(HAPPINESS_MAX, pet.happiness + 20);
-        currentMode = MODE_PET;
-        petDrawX = PET_GIF_X;
-        petDrawY = PET_GIF_Y;
-
-        pet.triggerEmotionOverride(EMOTION_WASHING, 4000);
-        pet.setStatus("Squeaky clean!", 3500);
-        drawPetScreen(true);
-        loadPetGif(EMOTION_WASHING);
-        savePetState();
-        printPetStatusSerial();
+    if (!washBubbleActive || washSpongeShowing) return;
+    if (btnIndex < 0 || btnIndex > 3) return;
+    
+    if (btnIndex == washBubbleBtn) {
+        // Correct button! Pop the bubble!
+        washBubbleActive = false;
+        washScore++;
+        washCurrentBubble++;
+        
+        // Clear bubble area
+        gfx->fillCircle(washBubbleX, washBubbleY, 22, COLOR_PET_BG);
+        
+        // Show sponge at bubble position
+        washSpongeShowing = true;
+        washSpongeUntil = millis() + 400;
+        washSpongeX = washBubbleX;
+        washSpongeY = washBubbleY;
+        drawSponge(washSpongeX, washSpongeY);
+        
+        drawWashScore();
+        
+        Serial.printf("-> POPPED Bubble %d! (btn %d) (%d/%d done)\n", 
+                       washCurrentBubble, btnIndex + 1, washScore, washTotalBubbles);
+    } else {
+        // Wrong button — flash indicator
+        gfx->drawCircle(washBubbleX, washBubbleY, 20, COLOR_RED);
+        delay(80);
+        drawCurrentBubble(); // Redraw normal
+        Serial.printf("-> WRONG! Need button %d, got %d\n", washBubbleBtn + 1, btnIndex + 1);
     }
 }
 
