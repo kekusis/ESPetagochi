@@ -95,6 +95,9 @@ int feedScore = 0;
 unsigned long nextTreatSpawnTime = 0;
 
 // Wash Game (Bubble Scrub)
+const int bubbleCenterX[4] = {30, 210, 36, 204};
+const int bubbleCenterY[4] = {65, 65, 142, 142};
+const int bubbleRadius = 18;
 bool washBubbles[4] = {true, true, true, true};
 int washBubblesLeft = 4;
 
@@ -173,34 +176,58 @@ void GIFDraw(GIFDRAW *pDraw) {
 
     static uint16_t lineBuf[LCD_WIDTH];
     
-    if (pDraw->ucHasTransparency) {
-        uint8_t trans = pDraw->ucTransparent;
-        int spanStart = -1;
-        int spanLen = 0;
-
-        for (int i = 0; i < w; i++) {
-            uint8_t pixel = s[i];
-            if (pixel != trans) {
-                if (spanStart == -1) {
-                    spanStart = i;
-                    spanLen = 0;
-                }
-                lineBuf[spanLen++] = palette[pixel];
-            } else {
-                if (spanStart != -1) {
-                    gfx->draw16bitRGBBitmap(x + spanStart, y, lineBuf, spanLen, 1);
-                    spanStart = -1;
+    // In wash minigame, calculate active bubble exclusion spans for this scanline 'y'
+    // By skipping bubble pixels during GIF rendering, the bubbles never get erased and NEVER flicker!
+    bool hasBubbleExcl = false;
+    int exclX1[4], exclX2[4], numExcl = 0;
+    if (currentMode == MODE_GAME_WASH) {
+        for (int b = 0; b < 4; b++) {
+            if (washBubbles[b]) {
+                int dy = abs(y - bubbleCenterY[b]);
+                if (dy <= bubbleRadius) {
+                    int dx = sqrt(bubbleRadius * bubbleRadius - dy * dy);
+                    exclX1[numExcl] = bubbleCenterX[b] - dx;
+                    exclX2[numExcl] = bubbleCenterX[b] + dx;
+                    numExcl++;
+                    hasBubbleExcl = true;
                 }
             }
         }
-        if (spanStart != -1) {
-            gfx->draw16bitRGBBitmap(x + spanStart, y, lineBuf, spanLen, 1);
+    }
+
+    int spanStart = -1;
+    int spanLen = 0;
+    uint8_t trans = pDraw->ucHasTransparency ? pDraw->ucTransparent : 255;
+    bool checkTrans = pDraw->ucHasTransparency;
+
+    for (int i = 0; i < w; i++) {
+        uint8_t pixel = s[i];
+        int px = x + i;
+        bool skip = (checkTrans && pixel == trans);
+        if (!skip && hasBubbleExcl) {
+            for (int b = 0; b < numExcl; b++) {
+                if (px >= exclX1[b] && px <= exclX2[b]) {
+                    skip = true;
+                    break;
+                }
+            }
         }
-    } else {
-        for (int i = 0; i < w; i++) {
-            lineBuf[i] = palette[s[i]];
+
+        if (!skip) {
+            if (spanStart == -1) {
+                spanStart = i;
+                spanLen = 0;
+            }
+            lineBuf[spanLen++] = palette[pixel];
+        } else {
+            if (spanStart != -1) {
+                gfx->draw16bitRGBBitmap(x + spanStart, y, lineBuf, spanLen, 1);
+                spanStart = -1;
+            }
         }
-        gfx->draw16bitRGBBitmap(x, y, lineBuf, w, 1);
+    }
+    if (spanStart != -1) {
+        gfx->draw16bitRGBBitmap(x + spanStart, y, lineBuf, spanLen, 1);
     }
 }
 
@@ -313,8 +340,8 @@ void drawStatusBar() {
 }
 
 void drawFooter() {
-    // Footer toolbar on fur background (Y: 198 to 240) - seamless, no split line!
-    gfx->fillRect(0, 198, LCD_WIDTH, 42, COLOR_PET_BG);
+    // Footer toolbar on fur background (Y: 200 to 240) - seamless, no split line!
+    gfx->fillRect(0, 200, LCD_WIDTH, 40, COLOR_PET_BG);
 
     if (currentMode == MODE_PET) {
         const char *btnNums[4] = {"1", "2", "3", "4"};
@@ -322,19 +349,18 @@ void drawFooter() {
         uint16_t btnColors[4] = {COLOR_HUNGER, COLOR_CLEAN, COLOR_HAPPY, COLOR_ENERGY};
 
         for (int i = 0; i < 4; i++) {
-            int bx = 4 + i * 59;
-            gfx->drawRoundRect(bx, 202, 55, 34, 4, COLOR_BORDER);
+            int bx = 6 + i * 59;
             
-            // Large bold number in TextSize 2
+            // Bold colored number (16px high: Y: 214 to 230 -> exactly 10px from bottom 240!)
             gfx->setTextColor(btnColors[i]);
             gfx->setTextSize(2);
-            gfx->setCursor(bx + 7, 205);
+            gfx->setCursor(bx, 214);
             gfx->print(btnNums[i]);
 
-            // Clean action label in crisp dark text on fur background
+            // Clean action label in crisp dark text on fur background (8px high: Y: 222 to 230)
             gfx->setTextColor(COLOR_BLACK);
             gfx->setTextSize(1);
-            gfx->setCursor(bx + 24, 210);
+            gfx->setCursor(bx + 14, 222);
             gfx->print(btnLabels[i]);
         }
     }
@@ -410,17 +436,17 @@ void drawTreat(int x, int y, int type) {
 }
 
 void eraseTreat(int x, int y) {
-    // Strictly erase between the header boundary (Y > 36) and above the pet body
-    // Erases with COLOR_PET_BG (light gray fur) so food moves cleanly across the fur!
+    // Strictly erase between the header boundary (Y > 36) and down to screen bottom
+    // Erases with COLOR_PET_BG (fur color) so food moves cleanly across the fur!
     int top = max(37, y - 9);
-    int bottom = min(petDrawY + 24, y + 10);
+    int bottom = min(LCD_HEIGHT, y + 10);
     if (bottom > top) {
         gfx->fillRect(x - 9, top, 19, bottom - top, COLOR_PET_BG);
     }
 }
 
 // ==========================================
-// Minigame 1: FALLING TREATS (Non-repeating lanes, fast, large text)
+// Minigame 1: FALLING TREATS (Smooth, Non-lagging, Non-repeating lanes)
 // ==========================================
 void startFeedGame() {
     currentMode = MODE_GAME_FEED;
@@ -430,54 +456,63 @@ void startFeedGame() {
     petLane = 1;
     lastTreatLane = -1;
 
-    // Position pet at bottom of screen (large pet face fills screen)
+    // Position pet at bottom of screen
     petDrawX = laneX[petLane] - (PET_GIF_W / 2);
     petDrawY = 88;
 
     currentTreat.active = false;
     nextTreatSpawnTime = millis() + 300;
 
-    gfx->fillScreen(COLOR_PET_BG); // Light gray fur background!
+    gfx->fillScreen(COLOR_PET_BG); // Fur background!
 
-    // Large readable header in dedicated banner (Y: 0 to 36)
+    // Dedicated banner (Y: 0 to 36)
     drawFeedScore();
 
     loadPetGif(EMOTION_IDLE);
     gif.playFrame(true, NULL);
 
     Serial.println("\n>>> MINIGAME: FAST FALLING TREATS STARTED <<<");
-    Serial.println("Treats falling fast! Press [1], [2], [3], [4] on keyboard to catch them!");
+    Serial.println("Treats falling! Press [1], [2], [3], [4] on keyboard to catch them!");
 }
 
 void updateFeedGame() {
     unsigned long now = millis();
 
-    // 1. Spawn a new treat with GUARANTEED LANE VARIETY (never repeats same lane!)
+    // 1. Keep Pet GIF playing at its current lane position FIRST
+    if (gifLoaded && now >= nextFrameTime) {
+        int iDelay = 0;
+        if (!gif.playFrame(true, &iDelay)) {
+            loadPetGif(pet.overrideEndTime > now ? pet.overrideEmotion : EMOTION_IDLE);
+        } else {
+            nextFrameTime = now + iDelay;
+        }
+    }
+
+    // 2. Spawn a new treat with guaranteed variety
     if (!currentTreat.active && feedTreatsSpawned < feedTreatsTotal) {
         if (now >= nextTreatSpawnTime) {
             currentTreat.active = true;
 
-            // Pick a different lane from the last one (offsets 1, 2, or 3)
             int offset = 1 + random(3);
             currentTreat.lane = (lastTreatLane == -1) ? random(4) : (lastTreatLane + offset) % 4;
             lastTreatLane = currentTreat.lane;
 
             currentTreat.x = laneX[currentTreat.lane];
-            currentTreat.y = 44; // Spawn cleanly below header boundary (Y > 36)
+            currentTreat.y = 44;
             currentTreat.prevY = 44;
             currentTreat.type = random(3);
-            // Blazing fast fall speed: starts at 11 and scales up to 21+!
-            currentTreat.speed = 11 + (feedTreatsSpawned * 3 / 2) + random(3);
+            // Steady, smooth fall speed (no sudden jump or lag)
+            currentTreat.speed = 8 + (feedTreatsSpawned * 3 / 4);
             feedTreatsSpawned++;
             Serial.printf("-> Treat #%d falling in Lane %d! (Speed: %d)\n", feedTreatsSpawned, currentTreat.lane + 1, currentTreat.speed);
         }
     }
 
-    // 2. Animate the falling treat
+    // 3. Animate falling treat ON TOP of pet so it never lags or gets overwritten
     if (currentTreat.active) {
         eraseTreat(currentTreat.x, currentTreat.prevY);
         currentTreat.prevY = currentTreat.y;
-        currentTreat.y += currentTreat.speed; // FAST FALL!
+        currentTreat.y += currentTreat.speed;
 
         // Catch window: Y = 135 to 165
         if (currentTreat.y >= 135 && currentTreat.y <= 165) {
@@ -489,7 +524,6 @@ void updateFeedGame() {
                 pet.hunger = min(HUNGER_MAX, pet.hunger + 14);
                 pet.happiness = min(HAPPINESS_MAX, pet.happiness + 8);
 
-                // Update score header safely
                 drawFeedScore();
 
                 loadPetGif(EMOTION_EATING);
@@ -502,7 +536,7 @@ void updateFeedGame() {
         }
 
         // Miss check
-        if (currentTreat.active && currentTreat.y > 170) {
+        if (currentTreat.active && currentTreat.y > 175) {
             eraseTreat(currentTreat.x, currentTreat.y);
             currentTreat.active = false;
             Serial.printf("-> MISSED in Lane %d!\n", currentTreat.lane + 1);
@@ -514,7 +548,7 @@ void updateFeedGame() {
         }
     }
 
-    // 3. Check if game finished
+    // 4. Check if game finished
     if (!currentTreat.active && feedTreatsSpawned >= feedTreatsTotal) {
         delay(400);
         currentMode = MODE_PET;
@@ -533,17 +567,7 @@ void updateFeedGame() {
         return;
     }
 
-    // 4. Keep Pet GIF playing at its current lane position!
-    if (gifLoaded && now >= nextFrameTime) {
-        int iDelay = 0;
-        if (!gif.playFrame(true, &iDelay)) {
-            loadPetGif(pet.overrideEndTime > now ? pet.overrideEmotion : EMOTION_IDLE);
-        } else {
-            nextFrameTime = now + iDelay;
-        }
-    }
-
-    delay(8);
+    delay(10);
 }
 
 void handleFeedGameInput(int btnIndex) {
@@ -565,12 +589,8 @@ void handleFeedGameInput(int btnIndex) {
 }
 
 // ==========================================
-// Minigame 2: BUBBLE SCRUB (Flicker-Free, Layered, Large Pet)
+// Minigame 2: BUBBLE SCRUB (Zero-Flicker Hardware Exclusion, Large Pet)
 // ==========================================
-const int bubbleCenterX[4] = {30, 210, 36, 204};
-const int bubbleCenterY[4] = {65, 65, 142, 142};
-const int bubbleRadius = 18;
-
 void drawWashScore() {
     gfx->fillRect(0, 0, LCD_WIDTH, 36, COLOR_BG);
     gfx->drawFastHLine(0, 36, LCD_WIDTH, COLOR_BORDER);
@@ -627,21 +647,14 @@ void updateWashGame() {
     unsigned long now = millis();
 
     // 1. Keep Pet GIF playing in the center!
-    bool framePlayed = false;
+    // GIFDraw automatically skips active bubble regions so they NEVER flicker!
     if (gifLoaded && now >= nextFrameTime) {
         int iDelay = 0;
         if (!gif.playFrame(true, &iDelay)) {
             loadPetGif(EMOTION_DIRTY);
         } else {
             nextFrameTime = now + iDelay;
-            framePlayed = true;
         }
-    }
-
-    // 2. Draw wash bubbles strictly on top of the pet immediately after frame is rendered!
-    // Never redraw in idle loop between frames - eliminates flicker completely!
-    if (framePlayed) {
-        drawWashBubbles();
     }
 
     delay(10);
