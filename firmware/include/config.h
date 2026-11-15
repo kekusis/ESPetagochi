@@ -14,11 +14,11 @@
 #define TFT_RST      42
 #define TFT_BL       -1  // Set to -1 if backlight is always on, or GPIO if controlled
 
-// Full-screen Pet GIF Coordinates (240x154 GIF: stretched across the entire display!)
+// Full-screen Pet GIF Coordinates (240x152 GIF: stretched across the entire display!)
 #define PET_GIF_W    240
-#define PET_GIF_H    154
+#define PET_GIF_H    152
 #define PET_GIF_X    0                               // Touches left and right screen borders!
-#define PET_GIF_Y    42                              // Below status bar (Y: 42 to 196)
+#define PET_GIF_Y    44                              // Below status bar (Y: 44 to 196)
 
 // ==========================================
 // Hardware Button Pins (Configurable)

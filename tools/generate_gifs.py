@@ -1,330 +1,135 @@
 import os
-import random
-import math
-from PIL import Image, ImageDraw
+from PIL import Image, ImageSequence, ImageDraw
+from collections import deque
 
+DOWNLOADS_DIR = r"C:\Users\pezda\Downloads"
 OUTPUT_DIR = r"C:\Users\pezda\Desktop\ESPetagochi-main\assets\gifs"
 HEADER_PATH = r"C:\Users\pezda\Desktop\ESPetagochi-main\firmware\include\pet_gifs.h"
 
-# Display dimensions
-W, H = 240, 154
+# Darker Gray Fur Color (matches 0x9CD3 in RGB565 -> RGB 155, 155, 155)
+FUR_COLOR = (155, 155, 155)
+# Full screen width and height between HUD bars (240x152)
+OUT_W, OUT_H = 240, 152
 
-# Palette
-FUR_BG = (185, 180, 172)        # Warm grayish-taupe fur background (RGB565: 0xBDF5)
-EYEBROW_COLOR = (190, 155, 100) # Tan bean eyebrow spots
-EYE_BLUE = (60, 115, 180)       # Rich hand-drawn blue iris
-EYE_DARK = (20, 35, 60)         # Dark pupil center
-LINE_COLOR = (20, 20, 25)       # Charcoal/ink line
-BLUSH_COLOR = (225, 140, 150)   # Soft cheek blush
-TONGUE_COLOR = (235, 110, 130)  # Pink tongue
-
-def rough_polygon(draw, cx, cy, rx, ry, fill, outline=None, pts=16, jitter=1.4, rng=None):
-    if rng is None:
-        rng = random.Random()
-    coords = []
-    for i in range(pts):
-        angle = 2 * math.pi * i / pts
-        r_x = rx + rng.uniform(-jitter, jitter)
-        r_y = ry + rng.uniform(-jitter, jitter)
-        x = cx + r_x * math.cos(angle)
-        y = cy + r_y * math.sin(angle)
-        coords.append((x, y))
-    draw.polygon(coords, fill=fill, outline=outline)
-
-def rough_stroke(draw, pts, fill, width=4, jitter=1.2, rng=None):
-    if rng is None:
-        rng = random.Random()
-    j_pts = []
-    for (x, y) in pts:
-        jx = x + rng.uniform(-jitter, jitter)
-        jy = y + rng.uniform(-jitter, jitter)
-        j_pts.append((jx, jy))
-    for i in range(len(j_pts) - 1):
-        w = max(2, int(width + rng.uniform(-0.6, 0.6)))
-        draw.line([j_pts[i], j_pts[i+1]], fill=fill, width=w)
-        r = w / 2.0
-        draw.ellipse([j_pts[i][0]-r, j_pts[i][1]-r, j_pts[i][0]+r, j_pts[i][1]+r], fill=fill)
-
-def arc_points(cx, cy, rx, ry, start_angle, end_angle, steps=10):
-    pts = []
-    for i in range(steps + 1):
-        t = start_angle + (end_angle - start_angle) * (i / float(steps))
-        x = cx + rx * math.cos(t)
-        y = cy + ry * math.sin(t)
-        pts.append((x, y))
-    return pts
-
-def line_points(x0, y0, x1, y1, steps=8):
-    return [(x0 + (x1 - x0) * (i / float(steps)), y0 + (y1 - y0) * (i / float(steps))) for i in range(steps + 1)]
-
-def draw_wiggly_frame(
-    seed,
-    eye_style='idle',       # 'idle', 'blink', 'happy', 'sad', 'wink', 'sleep'
-    mouth_style='cat',      # 'cat', 'open_cat', 'sad', 'tongue', 'chew_open', 'chew_closed'
-    y_off=0, x_off=0,
-    blush=False,
-    dirt=False,
-    thought_food=False,
-    zzz_step=-1,
-    bubbles_step=-1,
-    ball_step=-1,
-    chew_crumb=False
-):
-    rng = random.Random(seed)
-    im = Image.new('RGB', (W, H), FUR_BG)
-    d = ImageDraw.Draw(im)
-
-    cx_l = 75 + x_off
-    cx_r = 165 + x_off
-    cy = 70 + y_off
-
-    # 1. Eyebrows (Tactile, wobbly organic tan spots)
-    if eye_style == 'sad':
-        rough_polygon(d, cx_l, cy - 34, 18, 9, fill=EYEBROW_COLOR, pts=16, jitter=1.5, rng=rng)
-        rough_polygon(d, cx_r, cy - 34, 18, 9, fill=EYEBROW_COLOR, pts=16, jitter=1.5, rng=rng)
-    elif eye_style == 'happy':
-        rough_polygon(d, cx_l, cy - 38, 18, 8, fill=EYEBROW_COLOR, pts=16, jitter=1.5, rng=rng)
-        rough_polygon(d, cx_r, cy - 38, 18, 8, fill=EYEBROW_COLOR, pts=16, jitter=1.5, rng=rng)
-    else:
-        rough_polygon(d, cx_l, cy - 32, 18, 8, fill=EYEBROW_COLOR, pts=16, jitter=1.5, rng=rng)
-        rough_polygon(d, cx_r, cy - 32, 18, 8, fill=EYEBROW_COLOR, pts=16, jitter=1.5, rng=rng)
-
-    # 2. Eyes
-    def draw_eye(ex, ey, style, is_right=False):
-        if style == 'happy':
-            # ^ curved smiling arch
-            pts = arc_points(ex, ey + 4, 20, 15, math.pi * 1.1, math.pi * 1.9, steps=10)
-            rough_stroke(d, pts, fill=LINE_COLOR, width=5, jitter=1.3, rng=rng)
-            return
-        elif style == 'sleep':
-            # u curved sleeping arch
-            pts = arc_points(ex, ey - 4, 20, 14, math.pi * 0.1, math.pi * 0.9, steps=10)
-            rough_stroke(d, pts, fill=LINE_COLOR, width=5, jitter=1.3, rng=rng)
-            return
-        elif style == 'blink':
-            pts = line_points(ex - 22, ey, ex + 22, ey, steps=8)
-            rough_stroke(d, pts, fill=LINE_COLOR, width=5, jitter=1.2, rng=rng)
-            return
-        elif style == 'wink' and not is_right:
-            # > winking shape
-            pts1 = line_points(ex - 18, ey - 10, ex + 8, ey, steps=6)
-            pts2 = line_points(ex + 8, ey, ex - 18, ey + 10, steps=6)
-            rough_stroke(d, pts1, fill=LINE_COLOR, width=5, jitter=1.2, rng=rng)
-            rough_stroke(d, pts2, fill=LINE_COLOR, width=5, jitter=1.2, rng=rng)
-            return
-
-        # Open Eye: Blue iris underneath thick rough top lash line
-        iris_pts = []
-        for i in range(12):
-            t = math.pi * (i / 11.0)
-            rx = 22 + rng.uniform(-1.2, 1.2)
-            ry = 22 + rng.uniform(-1.2, 1.2)
-            iris_pts.append((ex + rx * math.cos(t), ey - 8 + ry * math.sin(t)))
-        d.polygon(iris_pts, fill=EYE_BLUE)
-
-        # Dark pupil center
-        pupil_pts = []
-        for i in range(10):
-            t = math.pi * (i / 9.0)
-            rx = 12 + rng.uniform(-1.0, 1.0)
-            ry = 14 + rng.uniform(-1.0, 1.0)
-            pupil_pts.append((ex + rx * math.cos(t), ey - 4 + ry * math.sin(t)))
-        d.polygon(pupil_pts, fill=EYE_DARK)
-
-        # White glint (organic spot)
-        rough_polygon(d, ex - 10, ey - 1, 5, 5, fill=(255, 255, 255), pts=8, jitter=0.8, rng=rng)
-        rough_polygon(d, ex + 6, ey + 7, 3, 3, fill=(255, 255, 255), pts=6, jitter=0.6, rng=rng)
-
-        # Upper thick eyelash line
-        if style == 'sad':
-            pts = line_points(ex - 24, ey - 6, ex + 24, ey + 2 if not is_right else ey - 8, steps=8)
-        else:
-            pts = line_points(ex - 26, ey - 10, ex + 26, ey - 10, steps=8)
-            if is_right:
-                pts.append((ex + 32, ey - 14))
-            else:
-                pts.insert(0, (ex - 32, ey - 14))
-        rough_stroke(d, pts, fill=LINE_COLOR, width=5, jitter=1.2, rng=rng)
-
-    draw_eye(cx_l, cy, 'wink' if eye_style == 'wink' else eye_style, is_right=False)
-    draw_eye(cx_r, cy, 'idle' if eye_style == 'wink' else eye_style, is_right=True)
-
-    # 3. Blush
-    if blush:
-        rough_polygon(d, cx_l - 12, cy + 22, 12, 6, fill=BLUSH_COLOR, pts=10, jitter=1.5, rng=rng)
-        rough_polygon(d, cx_r + 12, cy + 22, 12, 6, fill=BLUSH_COLOR, pts=10, jitter=1.5, rng=rng)
-
-    # 4. Dirt Smudges
-    if dirt:
-        rough_polygon(d, cx_l - 12, cy + 20, 8, 5, fill=(120, 95, 75), pts=8, jitter=1.5, rng=rng)
-        rough_polygon(d, cx_r + 12, cy + 18, 9, 5, fill=(120, 95, 75), pts=8, jitter=1.5, rng=rng)
-        rough_polygon(d, 120, cy - 24, 7, 5, fill=(120, 95, 75), pts=8, jitter=1.5, rng=rng)
-        # Little doodle squiggles
-        d.line([(52, 26), (60, 32), (66, 26)], fill=(110, 150, 90), width=2)
-        d.line([(174, 24), (182, 30), (188, 24)], fill=(110, 150, 90), width=2)
-
-    # 5. Nose & Cat Mouth :3
-    nx = 120 + x_off
-    ny = cy + 34
-    rough_polygon(d, nx, ny + 3, 8, 4, fill=LINE_COLOR, pts=8, jitter=1.0, rng=rng)
-    rough_stroke(d, line_points(nx, ny + 5, nx, ny + 13, steps=4), fill=LINE_COLOR, width=3, jitter=0.8, rng=rng)
-
-    my = ny + 13
-    if mouth_style == 'cat':
-        pts_l = arc_points(nx - 9, my, 9, 8, math.pi * 0.1, math.pi * 0.9, steps=8)
-        pts_r = arc_points(nx + 9, my, 9, 8, math.pi * 0.1, math.pi * 0.9, steps=8)
-        rough_stroke(d, pts_l, fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-        rough_stroke(d, pts_r, fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-    elif mouth_style == 'open_cat':
-        mouth_pts = arc_points(nx, my + 2, 16, 12, 0, math.pi, steps=10)
-        d.polygon(mouth_pts, fill=(170, 50, 65))
-        rough_polygon(d, nx, my + 8, 8, 5, fill=TONGUE_COLOR, pts=8, jitter=1.0, rng=rng)
-        # Little fang
-        fang = [(nx - 8, my + 1), (nx - 3, my + 1), (nx - 5, my + 6)]
-        d.polygon(fang, fill=(255, 255, 255))
-        rough_stroke(d, mouth_pts, fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-        rough_stroke(d, line_points(nx - 16, my + 2, nx + 16, my + 2, steps=6), fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-    elif mouth_style == 'tongue':
-        pts_l = arc_points(nx - 9, my, 9, 8, math.pi * 0.1, math.pi * 0.9, steps=8)
-        pts_r = arc_points(nx + 9, my, 9, 8, math.pi * 0.1, math.pi * 0.9, steps=8)
-        rough_polygon(d, nx, my + 8, 7, 7, fill=TONGUE_COLOR, pts=10, jitter=1.2, rng=rng)
-        rough_stroke(d, pts_l, fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-        rough_stroke(d, pts_r, fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-    elif mouth_style == 'sad':
-        pts = arc_points(nx, my + 14, 16, 10, math.pi * 1.1, math.pi * 1.9, steps=10)
-        rough_stroke(d, pts, fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-    elif mouth_style == 'chew_open':
-        pts = arc_points(nx, my + 4, 12, 10, 0, math.pi, steps=8)
-        d.polygon(pts, fill=(170, 50, 65))
-        rough_stroke(d, pts, fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-        rough_stroke(d, line_points(nx - 12, my + 4, nx + 12, my + 4, steps=6), fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-    elif mouth_style == 'chew_closed':
-        pts_l = arc_points(nx - 8, my, 8, 7, math.pi * 0.1, math.pi * 0.9, steps=6)
-        pts_r = arc_points(nx + 8, my, 8, 7, math.pi * 0.1, math.pi * 0.9, steps=6)
-        rough_stroke(d, pts_l, fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-        rough_stroke(d, pts_r, fill=LINE_COLOR, width=3, jitter=1.0, rng=rng)
-
-    # 6. Thought Food (Hungry)
-    if thought_food:
-        bx, by = 195, 26
-        rough_polygon(d, bx - 2, by + 18, 5, 5, fill=(255, 255, 255), outline=LINE_COLOR, pts=8, jitter=1.0, rng=rng)
-        rough_polygon(d, bx + 8, by + 10, 7, 7, fill=(255, 255, 255), outline=LINE_COLOR, pts=8, jitter=1.0, rng=rng)
-        rough_polygon(d, bx + 12, by - 6, 24, 18, fill=(255, 255, 255), outline=LINE_COLOR, pts=14, jitter=1.5, rng=rng)
-        rough_polygon(d, bx + 6, by - 8, 9, 7, fill=(215, 120, 50), outline=LINE_COLOR, pts=8, jitter=1.0, rng=rng)
-        rough_stroke(d, line_points(bx + 14, by - 8, bx + 22, by - 4, steps=4), fill=(240, 240, 240), width=4, jitter=0.8, rng=rng)
-
-    # 7. Floating Zzz (Sleeping)
-    if zzz_step >= 0:
-        zy = 32 - (zzz_step * 5)
-        d.text((185 + rng.randint(-1, 1), zy + 10 + rng.randint(-1, 1)), 'z', fill=(85, 115, 175))
-        d.text((198 + rng.randint(-1, 1), zy + rng.randint(-1, 1)), 'Z', fill=(55, 85, 150))
-
-    # 8. Soap Bubbles (Washing)
-    if bubbles_step >= 0:
-        for bx, by, r in [(25, 25 + bubbles_step * 3, 14), (205, 20 - bubbles_step * 3, 16), (28, 115, 10), (202, 110, 12)]:
-            rough_polygon(d, bx + r//2, by + r//2, r//2, r//2, fill=(185, 225, 245), outline=(65, 160, 220), pts=10, jitter=1.2, rng=rng)
-            d.point((bx + 3, by + 3), fill=(255, 255, 255))
-
-    # 9. Bouncing Ball (Playing)
-    if ball_step >= 0:
-        ball_x = 200 + (ball_step * 4)
-        ball_y = 100 - [0, 24, 38, 28, 14, 0][ball_step % 6]
-        rough_polygon(d, ball_x, ball_y, 12, 12, fill=(240, 70, 60), outline=LINE_COLOR, pts=12, jitter=1.2, rng=rng)
-        rough_stroke(d, arc_points(ball_x, ball_y, 8, 8, math.pi * 0.2, math.pi * 0.8, steps=6), fill=(255, 255, 255), width=2, jitter=0.6, rng=rng)
-
-    # 10. Crumbs (Eating)
-    if chew_crumb:
-        rough_polygon(d, nx + 18, my + 8, 3, 3, fill=(215, 130, 60), pts=6, jitter=0.8, rng=rng)
-        rough_polygon(d, nx - 20, my + 10, 3, 3, fill=(215, 130, 60), pts=6, jitter=0.8, rng=rng)
-
-    return im
+def process_frames(src_path, crop_box):
+    src = Image.open(src_path)
+    frames = []
+    durations = []
+    
+    for frame in ImageSequence.Iterator(src):
+        duration = frame.info.get('duration', 100)
+        durations.append(max(80, duration))
+        
+        rgba = frame.convert('RGBA')
+        cropped = rgba.crop(crop_box)
+        
+        w, h = cropped.size
+        pixels = cropped.load()
+        
+        # 1. Flood-fill outer white background from borders -> FUR_COLOR
+        #    Preserves interior eye highlights/glints completely
+        visited = set()
+        queue = deque()
+        for x in range(w):
+            queue.append((x, 0))
+            queue.append((x, h - 1))
+        for y in range(h):
+            queue.append((0, y))
+            queue.append((w - 1, y))
+            
+        while queue:
+            x, y = queue.popleft()
+            if (x, y) in visited:
+                continue
+            visited.add((x, y))
+            r, g, b, a = pixels[x, y]
+            if r > 230 and g > 230 and b > 230:
+                pixels[x, y] = (*FUR_COLOR, 255)
+                for nx, ny in [(x+1, y), (x-1, y), (x, y+1), (x, y-1)]:
+                    if 0 <= nx < w and 0 <= ny < h and (nx, ny) not in visited:
+                        queue.append((nx, ny))
+        
+        # 2. Replace any transparent or stray background pixels with fur color
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = pixels[x, y]
+                if a < 128:
+                    pixels[x, y] = (*FUR_COLOR, 255)
+                    
+        # 3. Resize to fill the entire 240x152 display canvas
+        resized = cropped.resize((OUT_W, OUT_H), Image.Resampling.NEAREST)
+        frames.append(resized.convert('RGB'))
+    return frames, durations
 
 def main():
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     os.makedirs(os.path.dirname(HEADER_PATH), exist_ok=True)
-
-    anims = {
-        # Idle: line-boiling alive in place at ~120ms with a quick natural blink!
-        'idle': ([
-            draw_wiggly_frame(101, eye_style='idle', mouth_style='cat', y_off=0),
-            draw_wiggly_frame(102, eye_style='idle', mouth_style='cat', y_off=0),
-            draw_wiggly_frame(103, eye_style='idle', mouth_style='cat', y_off=0),
-            draw_wiggly_frame(104, eye_style='idle', mouth_style='cat', y_off=0),
-            draw_wiggly_frame(105, eye_style='blink', mouth_style='cat', y_off=0),
-            draw_wiggly_frame(106, eye_style='idle', mouth_style='cat', y_off=0),
-        ], [130, 130, 130, 130, 100, 130]),
-
-        # Happy: boiling ^ ^ eyes, open smile with tooth, gentle bounce & blush
-        'happy': ([
-            draw_wiggly_frame(201, eye_style='happy', mouth_style='open_cat', blush=True, y_off=0),
-            draw_wiggly_frame(202, eye_style='happy', mouth_style='open_cat', blush=True, y_off=-2),
-            draw_wiggly_frame(203, eye_style='happy', mouth_style='open_cat', blush=True, y_off=0),
-            draw_wiggly_frame(204, eye_style='happy', mouth_style='cat', blush=True, y_off=1),
-        ], [160, 160, 160, 160]),
-
-        # Hungry: sad droopy eyes, shiver, thought bubble with food
-        'hungry': ([
-            draw_wiggly_frame(301, eye_style='sad', mouth_style='sad', thought_food=True, x_off=0, y_off=0),
-            draw_wiggly_frame(302, eye_style='sad', mouth_style='sad', thought_food=True, x_off=-1, y_off=1),
-            draw_wiggly_frame(303, eye_style='sad', mouth_style='sad', thought_food=True, x_off=0, y_off=0),
-            draw_wiggly_frame(304, eye_style='sad', mouth_style='sad', thought_food=True, x_off=1, y_off=1),
-        ], [180, 180, 180, 180]),
-
-        # Dirty: cute silly face with wiggling tongue :P and dirt smudges
-        'dirty': ([
-            draw_wiggly_frame(401, eye_style='idle', mouth_style='tongue', dirt=True, y_off=0),
-            draw_wiggly_frame(402, eye_style='idle', mouth_style='tongue', dirt=True, y_off=0),
-            draw_wiggly_frame(403, eye_style='blink', mouth_style='tongue', dirt=True, y_off=0),
-            draw_wiggly_frame(404, eye_style='idle', mouth_style='tongue', dirt=True, y_off=0),
-        ], [200, 200, 120, 200]),
-
-        # Eating: munching cycle with crumbs
-        'eating': ([
-            draw_wiggly_frame(501, eye_style='idle', mouth_style='chew_open', blush=True, y_off=0),
-            draw_wiggly_frame(502, eye_style='happy', mouth_style='chew_closed', blush=True, chew_crumb=True, y_off=1),
-            draw_wiggly_frame(503, eye_style='idle', mouth_style='chew_open', blush=True, y_off=0),
-            draw_wiggly_frame(504, eye_style='happy', mouth_style='chew_closed', blush=True, chew_crumb=True, y_off=1),
-        ], [160, 160, 160, 160]),
-
-        # Washing: cheerful boiling smile and drifting soap bubbles
-        'washing': ([
-            draw_wiggly_frame(601, eye_style='happy', mouth_style='open_cat', blush=True, bubbles_step=0),
-            draw_wiggly_frame(602, eye_style='happy', mouth_style='open_cat', blush=True, bubbles_step=1),
-            draw_wiggly_frame(603, eye_style='happy', mouth_style='cat', blush=True, bubbles_step=2),
-            draw_wiggly_frame(604, eye_style='happy', mouth_style='open_cat', blush=True, bubbles_step=3),
-        ], [160, 160, 160, 160]),
-
-        # Sleeping: peaceful u u eyes, gentle breathing and floating Zzz
-        'sleeping': ([
-            draw_wiggly_frame(701, eye_style='sleep', mouth_style='cat', zzz_step=0, y_off=0),
-            draw_wiggly_frame(702, eye_style='sleep', mouth_style='cat', zzz_step=1, y_off=1),
-            draw_wiggly_frame(703, eye_style='sleep', mouth_style='cat', zzz_step=2, y_off=2),
-            draw_wiggly_frame(704, eye_style='sleep', mouth_style='cat', zzz_step=3, y_off=1),
-        ], [250, 250, 250, 250]),
-
-        # Playing: playful wink and bouncing ball
-        'playing': ([
-            draw_wiggly_frame(801, eye_style='wink', mouth_style='open_cat', ball_step=0, y_off=0),
-            draw_wiggly_frame(802, eye_style='idle', mouth_style='open_cat', ball_step=1, y_off=-2),
-            draw_wiggly_frame(803, eye_style='happy', mouth_style='open_cat', ball_step=2, y_off=-1),
-            draw_wiggly_frame(804, eye_style='wink', mouth_style='cat', ball_step=3, y_off=0),
-            draw_wiggly_frame(805, eye_style='idle', mouth_style='open_cat', ball_step=4, y_off=-1),
-            draw_wiggly_frame(806, eye_style='happy', mouth_style='cat', ball_step=5, y_off=0),
-        ], [130, 130, 130, 130, 130, 130]),
-    }
-
-    header_content = """// Auto-generated Wiggly Paint pet animations header for ESP32 Tamagotchi
-// Authentic hand-drawn line boiling aesthetic with living vibrating strokes
+    
+    anims = {}
+    
+    # Tight crop boxes so face stretches across the entire screen!
+    crop_standard = (28, 13, 292, 180) # 264x167 -> aspect 1.58
+    crop_hungry = (28, 10, 344, 210)   # Includes thought bubble -> aspect 1.58
+    
+    # 1. Ingest User's Hand-Drawn Wiggly Paint GIFs with full-screen stretch
+    anims['idle'] = process_frames(os.path.join(DOWNLOADS_DIR, "idle.gif"), crop_standard)
+    anims['happy'] = process_frames(os.path.join(DOWNLOADS_DIR, "happy.gif"), crop_standard)
+    anims['hungry'] = process_frames(os.path.join(DOWNLOADS_DIR, "hungry.gif"), crop_hungry)
+    anims['dirty'] = process_frames(os.path.join(DOWNLOADS_DIR, "dirty.gif"), crop_standard)
+    anims['eating'] = process_frames(os.path.join(DOWNLOADS_DIR, "eating.gif"), crop_standard)
+    
+    for name in ['idle', 'happy', 'hungry', 'dirty', 'eating']:
+        print(f"Loaded and stretched {name}.gif: {len(anims[name][0])} frames")
+        
+    # 2. Derive the 3 remaining animations (sleeping, washing, playing) scaled up
+    happy_frames, happy_dur = anims['happy']
+    idle_frames, idle_dur = anims['idle']
+    
+    # Sleeping (gentle closed eyes face with drifting Zzz)
+    sleep_frames = []
+    for i in range(4):
+        f = happy_frames[i % len(happy_frames)].copy()
+        d = ImageDraw.Draw(f)
+        zy = 24 - (i * 4)
+        d.text((188, zy + 8), "z", fill=(100, 120, 180))
+        d.text((200, zy), "Z", fill=(70, 90, 160))
+        sleep_frames.append(f)
+    anims['sleeping'] = (sleep_frames, [300]*4)
+    
+    # Washing (joyful face with floating sparkling bubbles)
+    wash_frames = []
+    for i in range(4):
+        f = happy_frames[(i*2) % len(happy_frames)].copy()
+        d = ImageDraw.Draw(f)
+        for bx, by, r in [(16, 26 + i*3, 14), (206, 20 - i*3, 16), (20, 110, 10), (204, 105, 12)]:
+            d.ellipse([bx, by, bx+r, by+r], outline=(80, 180, 240), fill=(160, 215, 245), width=2)
+            d.point((bx+3, by+3), fill=(255, 255, 255))
+        wash_frames.append(f)
+    anims['washing'] = (wash_frames, [180]*4)
+    
+    # Playing (content face with bouncing ball)
+    play_frames = []
+    for i in range(6):
+        f = idle_frames[i % len(idle_frames)].copy()
+        d = ImageDraw.Draw(f)
+        ball_x = 195 + (i * 5)
+        ball_y = 105 - [0, 22, 36, 28, 14, 0][i]
+        d.ellipse([ball_x-10, ball_y-10, ball_x+10, ball_y+10], fill=(255, 80, 60), outline=(180, 40, 30), width=2)
+        play_frames.append(f)
+    anims['playing'] = (play_frames, [140]*6)
+    
+    # 3. Export to assets/gifs and build C header
+    header_content = """// Auto-generated pet animations header for ESP32 Tamagotchi
+// Full-screen stretched hand-drawn character face with darker gray fur
 #pragma once
 #include <Arduino.h>
 
 """
-    tot_bytes = 0
     for name, (frames, durations) in anims.items():
-        pal = frames[0].convert('P', palette=Image.ADAPTIVE, colors=32)
-        q_frames = [f.quantize(palette=pal, dither=Image.Dither.NONE) for f in frames]
+        pal_img = frames[0].convert('P', palette=Image.ADAPTIVE, colors=64)
+        q_frames = [f.quantize(palette=pal_img, dither=Image.Dither.NONE) for f in frames]
         gif_file = os.path.join(OUTPUT_DIR, f"{name}.gif")
-
+        
         q_frames[0].save(
             gif_file,
             save_all=True,
@@ -334,22 +139,20 @@ def main():
             optimize=True
         )
         sz = os.path.getsize(gif_file)
-        tot_bytes += sz
         print(f"Generated {name}.gif ({sz} bytes, {len(frames)} frames)")
-
+        
         with open(gif_file, "rb") as f:
             data = f.read()
-
+            
         header_content += f"// {name}.gif ({len(data)} bytes)\n"
         header_content += f"const uint8_t gif_{name}[] PROGMEM = {{\n  "
         hex_vals = [f"0x{b:02X}" for b in data]
         for i in range(0, len(hex_vals), 16):
             header_content += ", ".join(hex_vals[i:i+16]) + (",\n  " if i+16 < len(hex_vals) else "\n};\n")
         header_content += f"const size_t gif_{name}_len = sizeof(gif_{name});\n\n"
-
+        
     with open(HEADER_PATH, "w") as f:
         f.write(header_content)
-    print(f"Total GIF size: {tot_bytes} bytes across 8 animations.")
     print(f"Saved header at {HEADER_PATH}")
 
 if __name__ == "__main__":

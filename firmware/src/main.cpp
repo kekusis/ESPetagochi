@@ -40,7 +40,7 @@ unsigned long lastSaveTime = 0;
 #define SAVE_INTERVAL_MS 30000 // Auto-save to NVS every 30s
 
 // Color Definitions (RGB565)
-#define COLOR_PET_BG      0xBDF5  // Warm grayish-taupe fur (RGB: 185, 180, 172 - exact match to GIF background)
+#define COLOR_PET_BG      0x9CD3  // Darker gray fur (RGB: 155, 155, 155 - exact match to GIF background)
 #define COLOR_BG          0x18E4  // Dark slate for HUD panels & toolbars
 #define COLOR_WHITE       0xFFFF
 #define COLOR_BLACK       0x0000
