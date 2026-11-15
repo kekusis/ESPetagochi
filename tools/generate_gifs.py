@@ -92,7 +92,11 @@ def main():
     
     # 1. Ingest User's Hand-Drawn Wiggly Paint GIFs with full-screen stretch
     anims['idle'] = process_frames(os.path.join(DOWNLOADS_DIR, "idle.gif"), crop_standard)
-    anims['happy'] = process_frames(happy_file, crop_happy)
+    
+    # Slower, more relaxed playback for happy animation (190ms per frame)
+    happy_frames, _ = process_frames(happy_file, crop_happy)
+    anims['happy'] = (happy_frames, [190] * len(happy_frames))
+    
     anims['hungry'] = process_frames(os.path.join(DOWNLOADS_DIR, "hungry.gif"), crop_hungry)
     anims['dirty'] = process_frames(os.path.join(DOWNLOADS_DIR, "dirty.gif"), crop_standard)
     anims['eating'] = process_frames(os.path.join(DOWNLOADS_DIR, "eating.gif"), crop_standard)
@@ -102,14 +106,11 @@ def main():
         anims['sleeping'] = process_frames(sleep_file, crop_sleep, replace_all_white=True)
         print(f"Loaded user's authentic sleeping.gif: {len(anims['sleeping'][0])} frames (NO procedural Zs added)")
     else:
-        # Fallback if file not found
-        happy_frames, _ = anims['happy']
         anims['sleeping'] = ([f.copy() for f in happy_frames[:4]], [300]*4)
     
     for name in ['idle', 'happy', 'hungry', 'dirty', 'eating']:
         print(f"Loaded and stretched {name}.gif: {len(anims[name][0])} frames")
         
-    happy_frames, happy_dur = anims['happy']
     idle_frames, idle_dur = anims['idle']
     
     # Washing (joyful face with floating sparkling bubbles)
@@ -126,6 +127,10 @@ def main():
     # Playing: BALL REMOVED! Pure character animation
     play_frames = [f.copy() for f in idle_frames]
     anims['playing'] = (play_frames, idle_dur)
+    
+    # 20-Degree Rotated Idle Animations for PLAY minigame (Tilts directly toward active arrow!)
+    anims['play_left'] = ([f.rotate(20, resample=Image.BICUBIC, fillcolor=FUR_COLOR) for f in idle_frames], idle_dur)
+    anims['play_right'] = ([f.rotate(-20, resample=Image.BICUBIC, fillcolor=FUR_COLOR) for f in idle_frames], idle_dur)
     
     # 3. Export to assets/gifs and build C header
     header_content = """// Auto-generated pet animations header for ESP32 Tamagotchi

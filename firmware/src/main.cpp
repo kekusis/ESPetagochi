@@ -151,14 +151,6 @@ void GIFDraw(GIFDRAW *pDraw) {
     int x = petDrawX + pDraw->iX;
     int w = pDraw->iWidth;
 
-    // Apply tipping effect if playing idle during PLAY minigame
-    if (currentMode == MODE_GAME_PLAY && !playHappyMoment) {
-        int yRel = pDraw->y; // 0 to 151
-        // Tipping shear: top leans toward arrow, chin leans opposite
-        int tipOffset = (playTargetDir == 0) ? -((76 - yRel) * 10 / 76) : ((76 - yRel) * 10 / 76);
-        x += tipOffset;
-    }
-
     // Handle left-side clipping cleanly
     if (x < 0) {
         int skip = -x;
@@ -195,6 +187,21 @@ void GIFDraw(GIFDRAW *pDraw) {
         }
     }
 
+    // In play minigame, calculate active arrow exclusion so arrows always stay on top of face (zero Z-fight!)
+    bool hasArrowExcl = false;
+    int arrowX1 = 0, arrowX2 = 0;
+    if (currentMode == MODE_GAME_PLAY && !playHappyMoment) {
+        if (y >= 84 && y <= 132) {
+            if (playTargetDir == 0) {
+                arrowX1 = 6; arrowX2 = 54;
+                hasArrowExcl = true;
+            } else {
+                arrowX1 = 186; arrowX2 = 234;
+                hasArrowExcl = true;
+            }
+        }
+    }
+
     int spanStart = -1;
     int spanLen = 0;
     uint8_t trans = pDraw->ucHasTransparency ? pDraw->ucTransparent : 255;
@@ -210,6 +217,11 @@ void GIFDraw(GIFDRAW *pDraw) {
                     skip = true;
                     break;
                 }
+            }
+        }
+        if (!skip && hasArrowExcl) {
+            if (px >= arrowX1 && px <= arrowX2) {
+                skip = true;
             }
         }
 
@@ -253,6 +265,10 @@ void loadPetGif(PetEmotion emotion) {
             data = gif_sleeping; len = gif_sleeping_len; break;
         case EMOTION_PLAYING:
             data = gif_playing; len = gif_playing_len; break;
+        case EMOTION_PLAY_LEFT:
+            data = gif_play_left; len = gif_play_left_len; break;
+        case EMOTION_PLAY_RIGHT:
+            data = gif_play_right; len = gif_play_right_len; break;
         case EMOTION_IDLE:
         default:
             data = gif_idle; len = gif_idle_len; break;
@@ -716,7 +732,7 @@ void startPlayGame() {
     playHappyUntil = 0;
     playNextRoundTime = 0;
 
-    petDrawX = (playTargetDir == 0) ? -14 : 14;
+    petDrawX = 0; // Centered (not moved horizontally)
     petDrawY = PET_GIF_Y;
 
     gfx->fillScreen(COLOR_PET_BG); // Fur background
@@ -729,7 +745,8 @@ void startPlayGame() {
     gfx->setCursor(24, 10);
     gfx->print("MATCH KEKUSIS!");
 
-    loadPetGif(EMOTION_IDLE);
+    // Load authentic 20-degree rotated face matching direction
+    loadPetGif(playTargetDir == 0 ? EMOTION_PLAY_LEFT : EMOTION_PLAY_RIGHT);
 
     Serial.println("\n>>> MINIGAME: PLAY STARTED <<<");
     Serial.println("Look at prompt: Press [1] for LEFT, [2] for RIGHT!");
@@ -742,22 +759,22 @@ void updatePlayGame() {
     if (gifLoaded && now >= nextFrameTime) {
         int iDelay = 0;
         if (!gif.playFrame(true, &iDelay)) {
-            loadPetGif(playHappyMoment ? EMOTION_HAPPY : EMOTION_IDLE);
+            loadPetGif(playHappyMoment ? EMOTION_HAPPY : (playTargetDir == 0 ? EMOTION_PLAY_LEFT : EMOTION_PLAY_RIGHT));
         } else {
             nextFrameTime = now + iDelay;
         }
     }
 
-    // 2. Handle happy score moment
+    // 2. Handle happy score moment (split second!)
     if (playHappyMoment) {
         if (now >= playHappyUntil) {
             playHappyMoment = false;
             playRoundsLeft--;
             if (playRoundsLeft > 0) {
                 playTargetDir = random(2);
-                petDrawX = (playTargetDir == 0) ? -14 : 14;
+                petDrawX = 0;
                 gfx->fillRect(0, 37, LCD_WIDTH, 168, COLOR_PET_BG);
-                loadPetGif(EMOTION_IDLE);
+                loadPetGif(playTargetDir == 0 ? EMOTION_PLAY_LEFT : EMOTION_PLAY_RIGHT);
             } else {
                 // Game complete
                 currentMode = MODE_PET;
@@ -786,9 +803,9 @@ void updatePlayGame() {
             playRoundsLeft--;
             if (playRoundsLeft > 0) {
                 playTargetDir = random(2);
-                petDrawX = (playTargetDir == 0) ? -14 : 14;
+                petDrawX = 0;
                 gfx->fillRect(0, 37, LCD_WIDTH, 168, COLOR_PET_BG);
-                loadPetGif(EMOTION_IDLE);
+                loadPetGif(playTargetDir == 0 ? EMOTION_PLAY_LEFT : EMOTION_PLAY_RIGHT);
             } else {
                 currentMode = MODE_PET;
                 petDrawX = PET_GIF_X;
@@ -809,17 +826,17 @@ void updatePlayGame() {
         return;
     }
 
-    // 4. Large arrows pointing left/right
+    // 4. Large arrows pointing left/right (drawn on fur, excluded in GIFDraw so zero Z-fight)
     if (playTargetDir == 0) {
         // Arrow LEFT on left side of pet
         gfx->fillTriangle(8, 108, 38, 86, 38, 130, COLOR_HAPPY);
         gfx->fillRect(38, 98, 14, 20, COLOR_HAPPY);
-        gfx->fillRect(188, 86, 48, 46, COLOR_PET_BG); // Clear right
+        gfx->fillRect(186, 84, 50, 48, COLOR_PET_BG); // Clear right
     } else {
         // Arrow RIGHT on right side of pet
         gfx->fillTriangle(232, 108, 202, 86, 202, 130, COLOR_HAPPY);
         gfx->fillRect(188, 98, 14, 20, COLOR_HAPPY);
-        gfx->fillRect(8, 86, 48, 46, COLOR_PET_BG); // Clear left
+        gfx->fillRect(6, 84, 50, 48, COLOR_PET_BG); // Clear left
     }
 
     // Bottom round status in TextSize 2
@@ -840,7 +857,7 @@ void handlePlayGameInput(int btnIndex) {
     if (correct) {
         playScore++;
         playHappyMoment = true;
-        playHappyUntil = millis() + 1500; // Happy for 1.5 seconds!
+        playHappyUntil = millis() + 450; // SPLIT SECOND (450ms)!
         petDrawX = PET_GIF_X; // Center face
         loadPetGif(EMOTION_HAPPY); // Turn HAPPY!
 
@@ -855,7 +872,7 @@ void handlePlayGameInput(int btnIndex) {
         Serial.printf("-> MATCH! Correct direction! Score: %d/3\n", playScore);
     } else {
         Serial.println("-> MISMATCH! Wrong direction.");
-        playNextRoundTime = millis() + 600;
+        playNextRoundTime = millis() + 500;
         gfx->fillRect(10, 205, 220, 26, COLOR_PET_BG);
         gfx->setTextColor(COLOR_BLACK);
         gfx->setTextSize(2);

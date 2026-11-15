@@ -19,15 +19,11 @@ import serial
 import serial.tools.list_ports
 
 try:
-    import keyboard
-    HAS_KEYBOARD_LIB = True
-except ImportError:
-    HAS_KEYBOARD_LIB = False
-
-try:
     import tkinter as tk
     from tkinter import ttk, scrolledtext
     HAS_TK = True
+except ImportError:
+    HAS_TK = False
 except ImportError:
     HAS_TK = False
 
@@ -222,20 +218,11 @@ def launch_gui(port_name):
     for col in range(4):
         btn_frame.columnconfigure(col, weight=1)
 
-    # Keyboard listeners for 1, 2, 3, 4
+    # Keyboard listeners for 1, 2, 3, 4 (active ONLY when GUI window has focus!)
     for k in ["1", "2", "3", "4"]:
         num = int(k)
         root.bind_all(f"<Key-{k}>", lambda e, n=num: trigger_key(n))
         root.bind_all(f"<KP_{k}>", lambda e, n=num: trigger_key(n))
-
-    if HAS_KEYBOARD_LIB:
-        try:
-            keyboard.on_press_key("1", lambda e: trigger_key(1))
-            keyboard.on_press_key("2", lambda e: trigger_key(2))
-            keyboard.on_press_key("3", lambda e: trigger_key(3))
-            keyboard.on_press_key("4", lambda e: trigger_key(4))
-        except Exception:
-            pass
 
     # SECTION 2: Manual Stat Setters
     sec2 = tk.LabelFrame(root, text=" 📊 MANUAL STAT CONTROLS ", font=("Segoe UI", 9, "bold"),
@@ -364,11 +351,6 @@ def launch_gui(port_name):
     root.after(800, lambda: controller.send_command("status"))
 
     def on_closing():
-        if HAS_KEYBOARD_LIB:
-            try:
-                keyboard.unhook_all()
-            except Exception:
-                pass
         controller.close()
         root.destroy()
 
