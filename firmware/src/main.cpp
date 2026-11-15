@@ -103,6 +103,9 @@ int playTargetDir = 0; // 0 = Left (Btn 1), 1 = Right (Btn 2)
 int playRoundsLeft = 0;
 int playScore = 0;
 unsigned long playRoundStartTime = 0;
+bool playHappyMoment = false;
+unsigned long playHappyUntil = 0;
+unsigned long playNextRoundTime = 0;
 
 // ==========================================
 // Forward Declarations
@@ -144,6 +147,14 @@ void GIFDraw(GIFDRAW *pDraw) {
     int y = petDrawY + pDraw->iY + pDraw->y;
     int x = petDrawX + pDraw->iX;
     int w = pDraw->iWidth;
+
+    // Apply tipping effect if playing idle during PLAY minigame
+    if (currentMode == MODE_GAME_PLAY && !playHappyMoment) {
+        int yRel = pDraw->y; // 0 to 151
+        // Tipping shear: top leans toward arrow, chin leans opposite
+        int tipOffset = (playTargetDir == 0) ? -((76 - yRel) * 10 / 76) : ((76 - yRel) * 10 / 76);
+        x += tipOffset;
+    }
 
     // Handle left-side clipping cleanly
     if (x < 0) {
@@ -682,7 +693,7 @@ void handleWashGameInput(int btnIndex) {
 }
 
 // ==========================================
-// Minigame 3: DODGE & PLAY (Large text)
+// Minigame 3: DODGE & PLAY (Direction Match)
 // ==========================================
 void startPlayGame() {
     currentMode = MODE_GAME_PLAY;
@@ -690,11 +701,14 @@ void startPlayGame() {
     playScore = 0;
     playTargetDir = random(2);
     playRoundStartTime = millis();
+    playHappyMoment = false;
+    playHappyUntil = 0;
+    playNextRoundTime = 0;
 
-    petDrawX = PET_GIF_X;
+    petDrawX = (playTargetDir == 0) ? -14 : 14;
     petDrawY = PET_GIF_Y;
 
-    gfx->fillScreen(COLOR_PET_BG); // Light gray fur background!
+    gfx->fillScreen(COLOR_PET_BG); // Fur background
 
     // Large Header
     gfx->fillRect(0, 0, LCD_WIDTH, 36, COLOR_BG);
@@ -704,7 +718,7 @@ void startPlayGame() {
     gfx->setCursor(24, 10);
     gfx->print("MATCH KEKUSIS!");
 
-    loadPetGif(EMOTION_PLAYING);
+    loadPetGif(EMOTION_IDLE);
 
     Serial.println("\n>>> MINIGAME: PLAY STARTED <<<");
     Serial.println("Look at prompt: Press [1] for LEFT, [2] for RIGHT!");
@@ -713,17 +727,78 @@ void startPlayGame() {
 void updatePlayGame() {
     unsigned long now = millis();
 
-    // 1. Keep Pet GIF playing in the center!
+    // 1. Keep Pet GIF playing
     if (gifLoaded && now >= nextFrameTime) {
         int iDelay = 0;
         if (!gif.playFrame(true, &iDelay)) {
-            loadPetGif(EMOTION_PLAYING);
+            loadPetGif(playHappyMoment ? EMOTION_HAPPY : EMOTION_IDLE);
         } else {
             nextFrameTime = now + iDelay;
         }
     }
 
-    // 2. Large arrows and labels in TextSize 2
+    // 2. Handle happy score moment
+    if (playHappyMoment) {
+        if (now >= playHappyUntil) {
+            playHappyMoment = false;
+            playRoundsLeft--;
+            if (playRoundsLeft > 0) {
+                playTargetDir = random(2);
+                petDrawX = (playTargetDir == 0) ? -14 : 14;
+                gfx->fillRect(0, 37, LCD_WIDTH, 168, COLOR_PET_BG);
+                loadPetGif(EMOTION_IDLE);
+            } else {
+                // Game complete
+                currentMode = MODE_PET;
+                petDrawX = PET_GIF_X;
+                petDrawY = PET_GIF_Y;
+
+                pet.happiness = min(HAPPINESS_MAX, pet.happiness + 30);
+                pet.energy = max(0, pet.energy - 10);
+                pet.triggerEmotionOverride(EMOTION_HAPPY, 4000);
+                pet.setStatus(playScore >= 2 ? "You matched me! Yay!" : "Good try! Again soon!", 3500);
+
+                drawPetScreen(true);
+                loadPetGif(EMOTION_HAPPY);
+                savePetState();
+                printPetStatusSerial();
+                return;
+            }
+        }
+        return; // Keep showing happy animation while celebrating
+    }
+
+    // 3. Handle brief pause after mismatch
+    if (playNextRoundTime > 0) {
+        if (now >= playNextRoundTime) {
+            playNextRoundTime = 0;
+            playRoundsLeft--;
+            if (playRoundsLeft > 0) {
+                playTargetDir = random(2);
+                petDrawX = (playTargetDir == 0) ? -14 : 14;
+                gfx->fillRect(0, 37, LCD_WIDTH, 168, COLOR_PET_BG);
+                loadPetGif(EMOTION_IDLE);
+            } else {
+                currentMode = MODE_PET;
+                petDrawX = PET_GIF_X;
+                petDrawY = PET_GIF_Y;
+
+                pet.happiness = min(HAPPINESS_MAX, pet.happiness + 30);
+                pet.energy = max(0, pet.energy - 10);
+                pet.triggerEmotionOverride(playScore >= 2 ? EMOTION_HAPPY : EMOTION_IDLE, 4000);
+                pet.setStatus(playScore >= 2 ? "You matched me! Yay!" : "Good try! Again soon!", 3500);
+
+                drawPetScreen(true);
+                loadPetGif(playScore >= 2 ? EMOTION_HAPPY : EMOTION_IDLE);
+                savePetState();
+                printPetStatusSerial();
+                return;
+            }
+        }
+        return;
+    }
+
+    // 4. Large arrows pointing left/right
     if (playTargetDir == 0) {
         // Arrow LEFT on left side of pet
         gfx->fillTriangle(8, 108, 38, 86, 38, 130, COLOR_HAPPY);
@@ -748,33 +823,33 @@ void updatePlayGame() {
 
 void handlePlayGameInput(int btnIndex) {
     if (btnIndex != 0 && btnIndex != 1) return;
+    if (playHappyMoment || playNextRoundTime > 0) return; // Prevent spamming during transition
 
     bool correct = (btnIndex == playTargetDir);
     if (correct) {
         playScore++;
-        Serial.println("-> MATCH! Correct direction!");
+        playHappyMoment = true;
+        playHappyUntil = millis() + 1500; // Happy for 1.5 seconds!
+        petDrawX = PET_GIF_X; // Center face
+        loadPetGif(EMOTION_HAPPY); // Turn HAPPY!
+
+        // Clear arrows and show celebratory text
+        gfx->fillRect(0, 37, LCD_WIDTH, 168, COLOR_PET_BG);
+        gfx->fillRect(10, 205, 220, 26, COLOR_PET_BG);
+        gfx->setTextColor(COLOR_BLACK);
+        gfx->setTextSize(2);
+        gfx->setCursor(20, 210);
+        gfx->printf("SCORE: %d / 3  YAY!", playScore);
+
+        Serial.printf("-> MATCH! Correct direction! Score: %d/3\n", playScore);
     } else {
         Serial.println("-> MISMATCH! Wrong direction.");
-    }
-
-    playRoundsLeft--;
-    if (playRoundsLeft > 0) {
-        playTargetDir = random(2);
-        delay(250);
-    } else {
-        currentMode = MODE_PET;
-        petDrawX = PET_GIF_X;
-        petDrawY = PET_GIF_Y;
-
-        pet.happiness = min(HAPPINESS_MAX, pet.happiness + 30);
-        pet.energy = max(0, pet.energy - 10);
-        pet.triggerEmotionOverride(EMOTION_PLAYING, 4000);
-        pet.setStatus(playScore >= 2 ? "You matched me! Yay!" : "Good try! Again soon!", 3500);
-
-        drawPetScreen(true);
-        loadPetGif(EMOTION_PLAYING);
-        savePetState();
-        printPetStatusSerial();
+        playNextRoundTime = millis() + 600;
+        gfx->fillRect(10, 205, 220, 26, COLOR_PET_BG);
+        gfx->setTextColor(COLOR_BLACK);
+        gfx->setTextSize(2);
+        gfx->setCursor(20, 210);
+        gfx->printf("SCORE: %d / 3  MISS!", playScore);
     }
 }
 
