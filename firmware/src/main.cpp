@@ -178,21 +178,44 @@ void GIFDraw(GIFDRAW *pDraw) {
     }
     if (y < 0 || y >= LCD_HEIGHT || w <= 0) return;
 
+    // In main pet mode, don't render GIF over the speech bubble area (Y >= 192)
+    // This prevents the GIF from overwriting status/love message text
+    if (currentMode == MODE_PET && y >= 192) return;
+
     static uint16_t lineBuf[LCD_WIDTH];
     
-    // In wash minigame, calculate active bubble exclusion span for this scanline 'y'
-    // Single bubble at a time — skip its pixels so GIF never overwrites it
-    bool hasBubbleExcl = false;
-    int exclX1[1], exclX2[1], numExcl = 0;
+    // Build exclusion spans for this scanline
+    // Max exclusions: 1 bubble + 6 soap spots = 7
+    bool hasOverlayExcl = false;
+    int exclX1[8], exclX2[8], numExcl = 0;
+
+    // Wash minigame: active bubble exclusion
     if (currentMode == MODE_GAME_WASH && washBubbleActive && !washSpongeShowing) {
         int bubbleR = 18;
         int dy = abs(y - washBubbleY);
         if (dy <= bubbleR) {
             int dx = sqrt(bubbleR * bubbleR - dy * dy);
-            exclX1[0] = washBubbleX - dx;
-            exclX2[0] = washBubbleX + dx;
-            numExcl = 1;
-            hasBubbleExcl = true;
+            exclX1[numExcl] = washBubbleX - dx;
+            exclX2[numExcl] = washBubbleX + dx;
+            numExcl++;
+            hasOverlayExcl = true;
+        }
+    }
+
+    // Wash minigame: soap residue spot exclusions (so GIF doesn't paint over them)
+    if (currentMode == MODE_GAME_WASH) {
+        for (int s_i = 0; s_i < washTotalBubbles && numExcl < 8; s_i++) {
+            if (washSoapSpots[s_i].active) {
+                int soapR = 10;  // Slightly larger than drawn radius to prevent fringe
+                int dy = abs(y - washSoapSpots[s_i].y);
+                if (dy <= soapR) {
+                    int dx = sqrt(soapR * soapR - dy * dy);
+                    exclX1[numExcl] = washSoapSpots[s_i].x - dx;
+                    exclX2[numExcl] = washSoapSpots[s_i].x + dx;
+                    numExcl++;
+                    hasOverlayExcl = true;
+                }
+            }
         }
     }
 
@@ -220,7 +243,7 @@ void GIFDraw(GIFDRAW *pDraw) {
         uint8_t pixel = s[i];
         int px = x + i;
         bool skip = (checkTrans && pixel == trans);
-        if (!skip && hasBubbleExcl) {
+        if (!skip && hasOverlayExcl) {
             for (int b = 0; b < numExcl; b++) {
                 if (px >= exclX1[b] && px <= exclX2[b]) {
                     skip = true;
@@ -616,9 +639,9 @@ void drawSoapSpots() {
         if (washSoapSpots[i].active) {
             int sx = washSoapSpots[i].x;
             int sy = washSoapSpots[i].y;
-            gfx->fillCircle(sx, sy, 8, 0xAEFC);  // Light bubbly blue
+            gfx->fillCircle(sx, sy, 8, 0xFBB8);  // Soft pink soap
             gfx->fillCircle(sx - 3, sy - 2, 2, COLOR_WHITE); // Soap glint
-            gfx->fillCircle(sx + 4, sy + 3, 1, COLOR_WHITE);
+            gfx->fillCircle(sx + 4, sy + 3, 1, 0xFE19);  // Pink highlight
         }
     }
 }
@@ -641,10 +664,10 @@ void drawCurrentBubble() {
     int cy = washBubbleY;
     int r = 18;
     
-    // Outer bubble rim
-    gfx->drawCircle(cx, cy, r, COLOR_CLEAN);
-    // Soapy fill
-    gfx->fillCircle(cx, cy, r - 2, 0x2A9C);
+    // Outer bubble rim (pink)
+    gfx->drawCircle(cx, cy, r, 0xF81F);  // Magenta/pink rim
+    // Pink soapy fill
+    gfx->fillCircle(cx, cy, r - 2, 0xFBB8);  // Soft pink fill
     // White glint
     gfx->fillCircle(cx - 5, cy - 5, 3, COLOR_WHITE);
     
