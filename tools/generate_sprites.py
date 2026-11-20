@@ -36,6 +36,7 @@ TREAT_W, TREAT_H = 32, 32
 SPONGE_W, SPONGE_H = 20, 14
 
 def rgb_to_rgb565(r, g, b):
+    r, g, b = int(r), int(g), int(b)
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
 
 def make_crispy_pixel_art(im, target_w=32, target_h=32, max_colors=16, is_jpg=False):
