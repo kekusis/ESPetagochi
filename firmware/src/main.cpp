@@ -1,341 +1,297 @@
 #include <Arduino.h>
-#include <Arduino_GFX_Library.h>
+#include <LovyanGFX.hpp>
 #include <AnimatedGIF.h>
 #include <Preferences.h>
 #include <time.h>
 #include <sys/time.h>
 
 #include "config.h"
+#include "LGFX_Config.h"
 #include "pet_gifs.h"
 #include "treat_sprites.h"
 #include "PetState.h"
 
 // ==========================================
-// Hardware & Display Objects
+// Framebuffer renderer
+//
+// Everything is drawn into a RAM sprite first, then pushed to the ST7789 in
+// one operation. This removes the two classes of artifacts the old immediate
+// renderer suffered from:
+//   * flashing: partially drawn frames were visible on the panel
+//   * ghosting: moving sprites were "erased" with a solid color over a GIF
+//     frame, leaving holes when the GIF did not repaint that region
 // ==========================================
-Arduino_DataBus *bus = new Arduino_ESP32SPI(
-    TFT_DC, TFT_CS, TFT_SCK, TFT_MOSI, GFX_NOT_DEFINED
-);
+#define FRAME_INTERVAL_MS 33
+#define SAVE_INTERVAL_MS  30000
 
-Arduino_GFX *gfx = new Arduino_ST7789(
-    bus, TFT_RST, 0 /* rotation */, true /* IPS */, LCD_WIDTH, LCD_HEIGHT
-);
+static LGFX lcd;
+static lgfx::LGFX_Sprite scene(&lcd);
+static uint16_t scenePixels[LCD_WIDTH * LCD_HEIGHT] __attribute__((aligned(4)));
 
-AnimatedGIF gif;
-Pet pet;
-Preferences prefs;
-AppMode currentMode = MODE_PET;
+static Preferences prefs;
+static Pet pet;
 
-// Dynamic Pet Placement (allows pet to move across lanes in minigames!)
-int petDrawX = PET_GIF_X;
-int petDrawY = PET_GIF_Y;
-
-// Animation playback state
-PetEmotion activeGifEmotion = (PetEmotion)-1;
-unsigned long nextFrameTime = 0;
-bool gifLoaded = false;
-
-// Time tracking & Persistence
-bool timeSynchronized = false;
-unsigned long lastSaveTime = 0;
-#define SAVE_INTERVAL_MS 30000 // Auto-save to NVS every 30s
-
-// Color Definitions (RGB565)
-#define COLOR_PET_BG      0x9CD3  // Darker gray fur (RGB: 155, 155, 155 - exact match to GIF background)
-#define COLOR_BG          0x18E4  // Dark slate for HUD panels & toolbars
+// RGB565 colors used throughout the UI.
+#define COLOR_PET_BG      0x9CD3
+#define COLOR_BG          0x18E4
 #define COLOR_WHITE       0xFFFF
 #define COLOR_BLACK       0x0000
-#define COLOR_GRAY        0x7BEF
-#define COLOR_DARK_GRAY   0x31A6
-#define COLOR_HUNGER      0xFD00  // Orange/Gold
-#define COLOR_CLEAN       0x5EBF  // Aqua/Cyan
-#define COLOR_HAPPY       0xFA08  // Coral/Pink
-#define COLOR_ENERGY      0xFFE0  // Yellow
-#define COLOR_BAR_BG      0x2124  // Bar slot background
-#define COLOR_BORDER      0x4A69  // Retro border
-#define COLOR_ACCENT      0x07E0  // Bright green
-#define COLOR_RED         0xF800  // Red for apples
+#define COLOR_HUNGER      0xFD00
+#define COLOR_CLEAN       0x5EBF
+#define COLOR_HAPPY       0xFA08
+#define COLOR_ENERGY      0xFFE0
+#define COLOR_BORDER      0x4A69
+#define COLOR_RED         0xF800
+#define COLOR_SOAP        0xFBB8
+#define COLOR_SOAP_HI     0xFE19
+#define COLOR_BUBBLE_RIM  0xF81F
 
-// Physical Button Debounce tracking
-struct Button {
+static const int laneX[4] = {34, 91, 149, 206};
+
+struct ButtonInput {
     uint8_t pin;
     bool lastState;
     bool currentState;
-    unsigned long lastDebounceTime;
+    unsigned long lastChange;
 };
 
-Button buttons[4] = {
-    {PIN_BTN_FEED, HIGH, HIGH, 0},
-    {PIN_BTN_WASH, HIGH, HIGH, 0},
-    {PIN_BTN_PLAY, HIGH, HIGH, 0},
+static ButtonInput buttons[4] = {
+    {PIN_BTN_FEED,  HIGH, HIGH, 0},
+    {PIN_BTN_WASH,  HIGH, HIGH, 0},
+    {PIN_BTN_PLAY,  HIGH, HIGH, 0},
     {PIN_BTN_SLEEP, HIGH, HIGH, 0}
 };
 
 // ==========================================
-// Minigame Variables
+// GIF layer: keeps a complete RGB565 canvas
+//
+// AnimatedGIF normally calls us with changed scanlines only. We apply those
+// lines (including transparency and disposal-to-background) to our own full
+// frame canvas. Because the whole canvas is redrawn every scene frame, no
+// stale pixels can survive a move or a partial GIF update.
 // ==========================================
-// 4 Lanes for Food Catch Minigame
-const int laneX[4] = {34, 91, 149, 206};
-int petLane = 1; // Pet starts in lane 1 (0 to 3)
-int lastTreatLane = -1; // Guaranteed variety tracker!
+class GifLayer {
+public:
+    uint16_t canvas[PET_GIF_W * PET_GIF_H];
 
-struct FallingTreat {
+    GifLayer()
+        : decoder(), active(EMOTION_IDLE), loaded(false), firstLine(true),
+          nextFrameAt(0), prevX1(0), prevY1(0), prevX2(PET_GIF_W - 1),
+          prevY2(PET_GIF_H - 1), prevDisposal2(false),
+          prevBackground(COLOR_PET_BG), curDisposal2(false),
+          curBackground(COLOR_PET_BG), curX1(0), curY1(0), curX2(-1), curY2(-1),
+          reopening(false)
+    {}
+
+    void begin() {
+        instance = this;
+        decoder.begin(GIF_PALETTE_RGB565_LE);
+        clearCanvas(COLOR_PET_BG);
+    }
+
+    bool isLoaded() const { return loaded; }
+    PetEmotion emotion() const { return active; }
+
+    void open(PetEmotion emotionToOpen) {
+        if (loaded) {
+            decoder.close();
+            loaded = false;
+        }
+
+        active = emotionToOpen;
+        size_t length = 0;
+        const uint8_t *data = dataFor(emotionToOpen, length);
+        if (!data || length == 0) return;
+
+        if (decoder.open(const_cast<uint8_t *>(data), (int)length, lineCallback)) {
+            loaded = true;
+            clearCanvas(COLOR_PET_BG);
+            prevX1 = 0;
+            prevY1 = 0;
+            prevX2 = PET_GIF_W - 1;
+            prevY2 = PET_GIF_H - 1;
+            prevDisposal2 = false;
+            decodeFrame();
+        }
+    }
+
+    void update(unsigned long now) {
+        if (loaded && now >= nextFrameAt) decodeFrame();
+    }
+
+    void draw(int x, int y) const {
+        scene.pushImage(x, y, PET_GIF_W, PET_GIF_H, canvas);
+    }
+
+private:
+    static GifLayer *instance;
+    AnimatedGIF decoder;
+    PetEmotion active;
+    bool loaded;
+    bool firstLine;
+    unsigned long nextFrameAt;
+
+    int prevX1, prevY1, prevX2, prevY2;
+    bool prevDisposal2;
+    uint16_t prevBackground;
+
+    bool curDisposal2;
+    uint16_t curBackground;
+    int curX1, curY1, curX2, curY2;
+    bool reopening;
+
+    static void lineCallback(GIFDRAW *draw) {
+        if (instance) instance->applyLine(draw);
+    }
+
+    static const uint8_t *dataFor(PetEmotion value, size_t &length) {
+        switch (value) {
+            case EMOTION_HAPPY:   length = gif_happy_len;   return gif_happy;
+            case EMOTION_HUNGRY:  length = gif_hungry_len;  return gif_hungry;
+            case EMOTION_DIRTY:   length = gif_dirty_len;   return gif_dirty;
+            case EMOTION_EATING:  length = gif_eating_len;  return gif_eating;
+            case EMOTION_WASHING: length = gif_washing_len; return gif_washing;
+            case EMOTION_SLEEPING:length = gif_sleeping_len;return gif_sleeping;
+            case EMOTION_PLAYING: length = gif_playing_len; return gif_playing;
+            case EMOTION_PLAY_LEFT: length = gif_play_left_len; return gif_play_left;
+            case EMOTION_PLAY_RIGHT:length = gif_play_right_len;return gif_play_right;
+            case EMOTION_IDLE:
+            default:              length = gif_idle_len;    return gif_idle;
+        }
+    }
+
+    void clearCanvas(uint16_t color) {
+        for (int i = 0; i < PET_GIF_W * PET_GIF_H; i++) canvas[i] = color;
+    }
+
+    void fillCanvasRect(int x, int y, int w, int h, uint16_t color) {
+        int x1 = constrain(x, 0, PET_GIF_W - 1);
+        int y1 = constrain(y, 0, PET_GIF_H - 1);
+        int x2 = constrain(x + w - 1, 0, PET_GIF_W - 1);
+        int y2 = constrain(y + h - 1, 0, PET_GIF_H - 1);
+        for (int row = y1; row <= y2; row++) {
+            uint16_t *dest = &canvas[row * PET_GIF_W];
+            for (int col = x1; col <= x2; col++) dest[col] = color;
+        }
+    }
+
+    void applyLine(GIFDRAW *draw) {
+        if (firstLine) {
+            // Dispose the previous frame before drawing the new one.
+            if (prevDisposal2 && prevX2 >= prevX1 && prevY2 >= prevY1) {
+                fillCanvasRect(prevX1, prevY1,
+                               prevX2 - prevX1 + 1, prevY2 - prevY1 + 1,
+                               prevBackground);
+            }
+            firstLine = false;
+            curX1 = PET_GIF_W;
+            curY1 = PET_GIF_H;
+            curX2 = -1;
+            curY2 = -1;
+            curDisposal2 = (draw->ucDisposalMethod == 2);
+            curBackground = draw->pPalette
+                          ? draw->pPalette[draw->ucBackground & 0xFF]
+                          : COLOR_PET_BG;
+        }
+
+        int frameX = draw->iX;
+        int frameY = draw->iY + draw->y;
+        int width = draw->iWidth;
+
+        curX1 = min(curX1, frameX);
+        curX2 = max(curX2, frameX + width - 1);
+        curY1 = min(curY1, frameY);
+        curY2 = max(curY2, frameY);
+
+        const uint8_t transparent = draw->ucHasTransparency
+                                  ? draw->ucTransparent : 0xFF;
+        for (int i = 0; i < width; i++) {
+            int px = frameX + i;
+            if (px < 0 || px >= PET_GIF_W || frameY < 0 || frameY >= PET_GIF_H) {
+                continue;
+            }
+            uint8_t index = draw->pPixels[i];
+            if (draw->ucHasTransparency && index == transparent) continue;
+            canvas[frameY * PET_GIF_W + px] = draw->pPalette[index];
+        }
+
+        // Remember this frame's rectangle for the next frame's disposal.
+        prevX1 = curX1;
+        prevY1 = curY1;
+        prevX2 = curX2;
+        prevY2 = curY2;
+        prevDisposal2 = curDisposal2;
+        prevBackground = curBackground;
+    }
+
+    void decodeFrame() {
+        firstLine = true;
+        int delayMs = 0;
+        int result = decoder.playFrame(true, &delayMs);
+        if (result <= 0 && !reopening) {
+            // End of animation: reopen so decoder state is fully reset.
+            reopening = true;
+            open(active);          // decodes the first frame itself
+            reopening = false;
+            return;
+        }
+        if (result <= 0) delayMs = 100;
+        nextFrameAt = millis() + (unsigned long)max(1, delayMs);
+    }
+};
+
+GifLayer *GifLayer::instance = nullptr;
+GifLayer gifLayer;
+
+// ==========================================
+// Application state
+// ==========================================
+static AppMode mode = MODE_PET;
+static int petDrawX = PET_GIF_X;
+static int petDrawY = PET_GIF_Y;
+
+static unsigned long lastRenderAt = 0;
+static unsigned long lastSaveAt = 0;
+
+int petDrawLane();
+
+struct FeedState {
     bool active;
     int lane;
     int x;
     int y;
-    int prevY;
-    int type; // 0 to NUM_TREAT_TYPES-1 (14 food sprites)
+    int type;
     int speed;
-};
+    int spawned;
+    int score;
+    unsigned long nextSpawnAt;
+    unsigned long lastMoveAt;
+    unsigned long finishAt;
+} feed;
 
-FallingTreat currentTreat;
-int feedTreatsTotal = 8;
-int feedTreatsSpawned = 0;
-int feedScore = 0;
-unsigned long nextTreatSpawnTime = 0;
+struct WashState {
+    bool bubbleActive;
+    int currentBubble;
+    int bubbleX;
+    int bubbleY;
+    int bubbleButton;
+    int score;
+    unsigned long wrongUntil;
+    unsigned long finishAt;
+    struct Spot { int x, y; bool active; } spots[6];
+} wash;
 
-// Wash Game (Sequential Bubble Pop with Sponge)
-int washTotalBubbles = 6;
-int washCurrentBubble = 0;  // Which bubble we're on (0-5)
-int washBubbleX = 0;        // Current bubble position
-int washBubbleY = 0;
-int washBubbleBtn = 0;      // Required button (0-3, displayed as 1-4)
-bool washBubbleActive = false;
-bool washSpongeShowing = false;
-unsigned long washSpongeUntil = 0;
-int washSpongeX = 0;
-int washSpongeY = 0;
-// Soap residue spots left after cleaning
-struct SoapSpot {
-    int x, y;
-    bool active;
-};
-SoapSpot washSoapSpots[6];
-int washScore = 0;
-
-// Play Game (Direction Match)
-int playTargetDir = 0; // 0 = Left (Btn 1), 1 = Right (Btn 2)
-int playRoundsLeft = 0;
-int playScore = 0;
-unsigned long playRoundStartTime = 0;
-bool playHappyMoment = false;
-unsigned long playHappyUntil = 0;
-unsigned long playNextRoundTime = 0;
+struct PlayState {
+    int roundsLeft;
+    int score;
+    int targetDirection;
+    bool celebrating;
+    unsigned long celebrateUntil;
+    unsigned long nextRoundAt;
+} play;
 
 // ==========================================
-// Forward Declarations
-// ==========================================
-void handleButtonPress(int btnIndex);
-void loadPetGif(PetEmotion emotion);
-void drawPetScreen(bool fullRedraw = false);
-void drawStatusBar();
-void drawFooter();
-void printSerialHelp();
-void printPetStatusSerial();
-void savePetState();
-void loadPetState();
-
-// Minigame functions
-void startFeedGame();
-void updateFeedGame();
-void handleFeedGameInput(int btnIndex);
-void drawFeedScore();
-void drawTreat(int x, int y, int type);
-void eraseTreat(int x, int y);
-
-void startWashGame();
-void updateWashGame();
-void handleWashGameInput(int btnIndex);
-void drawWashScore();
-
-void startPlayGame();
-void updatePlayGame();
-void handlePlayGameInput(int btnIndex);
-
-// ==========================================
-// GIFDraw Callback for AnimatedGIF
-// ==========================================
-void GIFDraw(GIFDRAW *pDraw) {
-    uint8_t *s = pDraw->pPixels;
-    uint16_t *palette = pDraw->pPalette;
-    int y = petDrawY + pDraw->iY + pDraw->y;
-    int x = petDrawX + pDraw->iX;
-    int w = pDraw->iWidth;
-
-    // Handle left-side clipping cleanly
-    if (x < 0) {
-        int skip = -x;
-        if (skip >= w) return;
-        s += skip;
-        w -= skip;
-        x = 0;
-    }
-
-    // Handle right-side clipping
-    if (x + w > LCD_WIDTH) {
-        w = LCD_WIDTH - x;
-    }
-    if (y < 0 || y >= LCD_HEIGHT || w <= 0) return;
-
-    // In main pet mode, don't render GIF over the speech bubble area (Y >= 192)
-    // This prevents the GIF from overwriting status/love message text
-    if (currentMode == MODE_PET && y >= 192) return;
-
-    static uint16_t lineBuf[LCD_WIDTH];
-    
-    // Build exclusion spans for this scanline
-    // Max exclusions: 1 treat + 1 bubble + 6 soap spots = 8
-    bool hasOverlayExcl = false;
-    int exclX1[8], exclX2[8], numExcl = 0;
-
-    // Feed minigame: exclude treat bounding box so GIF never paints over it (zero flicker!)
-    if (currentMode == MODE_GAME_FEED && currentTreat.active) {
-        int tx1 = currentTreat.x - TREAT_SPRITE_W / 2;
-        int tx2 = currentTreat.x + TREAT_SPRITE_W / 2 - 1;
-        int ty1 = currentTreat.y - TREAT_SPRITE_H / 2;
-        int ty2 = currentTreat.y + TREAT_SPRITE_H / 2 - 1;
-        if (y >= ty1 && y <= ty2) {
-            exclX1[numExcl] = tx1;
-            exclX2[numExcl] = tx2;
-            numExcl++;
-            hasOverlayExcl = true;
-        }
-    }
-
-    // Wash minigame: active bubble exclusion
-    if (currentMode == MODE_GAME_WASH && washBubbleActive) {
-        int bubbleR = 18;
-        int dy = abs(y - washBubbleY);
-        if (dy <= bubbleR) {
-            int dx = sqrt(bubbleR * bubbleR - dy * dy);
-            exclX1[numExcl] = washBubbleX - dx;
-            exclX2[numExcl] = washBubbleX + dx;
-            numExcl++;
-            hasOverlayExcl = true;
-        }
-    }
-
-    // Wash minigame: soap residue spot exclusions (so GIF doesn't paint over them)
-    if (currentMode == MODE_GAME_WASH) {
-        for (int s_i = 0; s_i < washTotalBubbles && numExcl < 8; s_i++) {
-            if (washSoapSpots[s_i].active) {
-                int soapR = 10;  // Slightly larger than drawn radius to prevent fringe
-                int dy = abs(y - washSoapSpots[s_i].y);
-                if (dy <= soapR) {
-                    int dx = sqrt(soapR * soapR - dy * dy);
-                    exclX1[numExcl] = washSoapSpots[s_i].x - dx;
-                    exclX2[numExcl] = washSoapSpots[s_i].x + dx;
-                    numExcl++;
-                    hasOverlayExcl = true;
-                }
-            }
-        }
-    }
-
-    // In play minigame, calculate active arrow exclusion so arrows always stay on top of face (zero Z-fight!)
-    bool hasArrowExcl = false;
-    int arrowX1 = 0, arrowX2 = 0;
-    if (currentMode == MODE_GAME_PLAY && !playHappyMoment) {
-        if (y >= 84 && y <= 132) {
-            if (playTargetDir == 0) {
-                arrowX1 = 6; arrowX2 = 54;
-                hasArrowExcl = true;
-            } else {
-                arrowX1 = 186; arrowX2 = 234;
-                hasArrowExcl = true;
-            }
-        }
-    }
-
-    int spanStart = -1;
-    int spanLen = 0;
-    uint8_t trans = pDraw->ucHasTransparency ? pDraw->ucTransparent : 255;
-    bool checkTrans = pDraw->ucHasTransparency;
-
-    for (int i = 0; i < w; i++) {
-        uint8_t pixel = s[i];
-        int px = x + i;
-        bool skip = (checkTrans && pixel == trans);
-        if (!skip && hasOverlayExcl) {
-            for (int b = 0; b < numExcl; b++) {
-                if (px >= exclX1[b] && px <= exclX2[b]) {
-                    skip = true;
-                    break;
-                }
-            }
-        }
-        if (!skip && hasArrowExcl) {
-            if (px >= arrowX1 && px <= arrowX2) {
-                skip = true;
-            }
-        }
-
-        if (!skip) {
-            if (spanStart == -1) {
-                spanStart = i;
-                spanLen = 0;
-            }
-            lineBuf[spanLen++] = palette[pixel];
-        } else {
-            if (spanStart != -1) {
-                gfx->draw16bitRGBBitmap(x + spanStart, y, lineBuf, spanLen, 1);
-                spanStart = -1;
-            }
-        }
-    }
-    if (spanStart != -1) {
-        gfx->draw16bitRGBBitmap(x + spanStart, y, lineBuf, spanLen, 1);
-    }
-}
-
-// ==========================================
-// GIF Management
-// ==========================================
-void loadPetGif(PetEmotion emotion) {
-    const uint8_t *data = nullptr;
-    size_t len = 0;
-
-    switch (emotion) {
-        case EMOTION_HAPPY:
-            data = gif_happy; len = gif_happy_len; break;
-        case EMOTION_HUNGRY:
-            data = gif_hungry; len = gif_hungry_len; break;
-        case EMOTION_DIRTY:
-            data = gif_dirty; len = gif_dirty_len; break;
-        case EMOTION_EATING:
-            data = gif_eating; len = gif_eating_len; break;
-        case EMOTION_WASHING:
-            data = gif_washing; len = gif_washing_len; break;
-        case EMOTION_SLEEPING:
-            data = gif_sleeping; len = gif_sleeping_len; break;
-        case EMOTION_PLAYING:
-            data = gif_playing; len = gif_playing_len; break;
-        case EMOTION_PLAY_LEFT:
-            data = gif_play_left; len = gif_play_left_len; break;
-        case EMOTION_PLAY_RIGHT:
-            data = gif_play_right; len = gif_play_right_len; break;
-        case EMOTION_IDLE:
-        default:
-            data = gif_idle; len = gif_idle_len; break;
-    }
-
-    if (gifLoaded) {
-        gif.close();
-        gifLoaded = false;
-    }
-
-    if (data && len > 0) {
-        if (gif.open((uint8_t *)data, len, GIFDraw)) {
-            gifLoaded = true;
-            activeGifEmotion = emotion;
-            nextFrameTime = millis();
-        }
-    }
-}
-
-// ==========================================
-// Persistence (NVS) & Time Tracking
+// Persistence
 // ==========================================
 void savePetState() {
     prefs.begin("kekusis", false);
@@ -344,11 +300,8 @@ void savePetState() {
     prefs.putInt("happy", pet.happiness);
     prefs.putInt("energy", pet.energy);
     prefs.putBool("sleep", pet.isSleeping);
-    
     time_t nowSec = time(nullptr);
-    if (nowSec > 100000) {
-        prefs.putULong("last_time", (unsigned long)nowSec);
-    }
+    if (nowSec > 100000) prefs.putULong("last_time", (unsigned long)nowSec);
     prefs.end();
 }
 
@@ -359,768 +312,571 @@ void loadPetState() {
     pet.happiness = prefs.getInt("happy", 85);
     pet.energy = prefs.getInt("energy", 95);
     pet.isSleeping = prefs.getBool("sleep", false);
-    unsigned long lastSavedEpoch = prefs.getULong("last_time", 0);
+    unsigned long lastSaved = prefs.getULong("last_time", 0);
     prefs.end();
 
     Serial.printf("[NVS] Loaded Kekusis: H:%d%% C:%d%% P:%d%% E:%d%% (Last Saved: %lu)\n",
-                  pet.hunger, pet.cleanliness, pet.happiness, pet.energy, lastSavedEpoch);
+                  pet.hunger, pet.cleanliness, pet.happiness, pet.energy, lastSaved);
 }
 
 // ==========================================
-// Drawing Functions (Large, Readable Text)
+// Drawing helpers (all target the framebuffer)
 // ==========================================
-void drawLargeMeter(int x, int y, int w, int h, int val, uint16_t color, const char *letter) {
-    // Large 12x16 label in TextSize 2
-    gfx->setTextColor(color);
-    gfx->setTextSize(2);
-    gfx->setCursor(x, y - 2);
-    gfx->print(letter);
+void drawMeter(lgfx::LGFX_Sprite &g, int x, int y, int w, int h,
+               int value, uint16_t color, const char *label) {
+    g.setTextColor(color);
+    g.setTextSize(2);
+    g.setCursor(x, y - 2);
+    g.print(label);
 
-    // Thick colored meter bar
     int barX = x + 16;
     int barW = w - 16;
-    gfx->drawRect(barX, y + 1, barW, h, COLOR_BORDER);
-    gfx->fillRect(barX + 1, y + 2, barW - 2, h - 2, COLOR_BAR_BG);
-    
-    int fillW = (val * (barW - 2)) / 100;
-    if (fillW > 0) {
-        gfx->fillRect(barX + 1, y + 2, fillW, h - 2, color);
+    g.drawRect(barX, y + 1, barW, h, COLOR_BORDER);
+    g.fillRect(barX + 1, y + 2, barW - 2, h - 2, 0x2124);
+
+    int fillW = (value * (barW - 2)) / 100;
+    if (fillW > 0) g.fillRect(barX + 1, y + 2, fillW, h - 2, color);
+}
+
+void drawStatusBar(lgfx::LGFX_Sprite &g) {
+    g.fillRect(0, 0, LCD_WIDTH, 40, COLOR_PET_BG);
+    drawMeter(g, 4, 4, 112, 12, pet.hunger, COLOR_HUNGER, "H");
+    drawMeter(g, 124, 4, 112, 12, pet.cleanliness, COLOR_CLEAN, "C");
+    drawMeter(g, 4, 22, 112, 12, pet.happiness, COLOR_HAPPY, "P");
+    drawMeter(g, 124, 22, 112, 12, pet.energy, COLOR_ENERGY, "E");
+}
+
+void drawFooter(lgfx::LGFX_Sprite &g) {
+    g.fillRect(0, 200, LCD_WIDTH, 40, COLOR_PET_BG);
+    if (mode != MODE_PET) return;
+
+    static const char *labels[4] = {"FEED", "WASH", "PLAY", nullptr};
+    const char *sleepLabel = pet.isSleeping ? "WAKE" : "ZZZ";
+    uint16_t colors[4] = {COLOR_HUNGER, COLOR_CLEAN, COLOR_HAPPY, COLOR_ENERGY};
+
+    for (int i = 0; i < 4; i++) {
+        int bx = 6 + i * 59;
+        g.setTextColor(colors[i]);
+        g.setTextSize(2);
+        g.setCursor(bx, 214);
+        g.print(i + 1);
+
+        g.setTextColor(COLOR_BLACK);
+        g.setTextSize(1);
+        g.setCursor(bx + 14, 222);
+        g.print(i == 3 ? sleepLabel : labels[i]);
     }
 }
 
-void drawStatusBar() {
-    // Header stats area on fur background (Y: 0 to 40) - seamless, no split line!
-    gfx->fillRect(0, 0, LCD_WIDTH, 40, COLOR_PET_BG);
+void drawSpeechBubble(lgfx::LGFX_Sprite &g, unsigned long now) {
+    g.fillRect(4, 192, LCD_WIDTH - 8, 8, COLOR_PET_BG);
+    if (now >= pet.statusMsgEndTime || pet.statusMsg[0] == '\0') return;
 
-    // Row 1 (Y: 4): Hunger (H) & Cleanliness (C)
-    drawLargeMeter(4, 4, 112, 12, pet.hunger, COLOR_HUNGER, "H");
-    drawLargeMeter(124, 4, 112, 12, pet.cleanliness, COLOR_CLEAN, "C");
-
-    // Row 2 (Y: 22): Happiness (P) & Energy (E)
-    drawLargeMeter(4, 22, 112, 12, pet.happiness, COLOR_HAPPY, "P");
-    drawLargeMeter(124, 22, 112, 12, pet.energy, COLOR_ENERGY, "E");
+    int textWidth = (int)strlen(pet.statusMsg) * 6;
+    int tx = max(4, (LCD_WIDTH - textWidth) / 2);
+    g.setTextColor(COLOR_BLACK);
+    g.setTextSize(1);
+    g.setCursor(tx, 192);
+    g.print(pet.statusMsg);
 }
 
-void drawFooter() {
-    // Footer toolbar on fur background (Y: 200 to 240) - seamless, no split line!
-    gfx->fillRect(0, 200, LCD_WIDTH, 40, COLOR_PET_BG);
+void drawGameHeader(lgfx::LGFX_Sprite &g, uint16_t color, const char *text) {
+    g.fillRect(0, 0, LCD_WIDTH, 36, COLOR_BG);
+    g.drawFastHLine(0, 36, LCD_WIDTH, COLOR_BORDER);
+    g.setTextColor(color);
+    g.setTextSize(2);
+    g.setCursor(22, 2);
+    g.print(text);
+}
 
-    if (currentMode == MODE_PET) {
-        const char *btnNums[4] = {"1", "2", "3", "4"};
-        const char *btnLabels[4] = {"FEED", "WASH", "PLAY", pet.isSleeping ? "WAKE" : "ZZZ"};
-        uint16_t btnColors[4] = {COLOR_HUNGER, COLOR_CLEAN, COLOR_HAPPY, COLOR_ENERGY};
+void drawTreat(lgfx::LGFX_Sprite &g) {
+    if (!feed.active || feed.y < 42) return;
+    int type = constrain(feed.type, 0, NUM_TREAT_TYPES - 1);
+    const uint16_t *sprite = (const uint16_t *)pgm_read_ptr(&treat_sprites[type]);
+    // Treat sprites bake in the fur-gray background. Treat it as a chroma key
+    // so falling food shows the animated pet behind it instead of a gray box.
+    g.pushImage(feed.x - TREAT_SPRITE_W / 2,
+                feed.y - TREAT_SPRITE_H / 2,
+                TREAT_SPRITE_W, TREAT_SPRITE_H, sprite,
+                (uint16_t)COLOR_TREAT_BG);
+}
 
-        for (int i = 0; i < 4; i++) {
-            int bx = 6 + i * 59;
-            
-            // Bold colored number (16px high: Y: 214 to 230 -> exactly 10px from bottom 240!)
-            gfx->setTextColor(btnColors[i]);
-            gfx->setTextSize(2);
-            gfx->setCursor(bx, 214);
-            gfx->print(btnNums[i]);
-
-            // Clean action label in crisp dark text on fur background (8px high: Y: 222 to 230)
-            gfx->setTextColor(COLOR_BLACK);
-            gfx->setTextSize(1);
-            gfx->setCursor(bx + 14, 222);
-            gfx->print(btnLabels[i]);
-        }
+void drawSoapSpots(lgfx::LGFX_Sprite &g) {
+    for (int i = 0; i < 6; i++) {
+        if (!wash.spots[i].active) continue;
+        int x = wash.spots[i].x;
+        int y = wash.spots[i].y;
+        g.fillCircle(x, y, 8, COLOR_SOAP);
+        g.fillCircle(x - 3, y - 2, 2, COLOR_WHITE);
+        g.fillCircle(x + 4, y + 3, 1, COLOR_SOAP_HI);
     }
 }
 
-void drawSpeechBubble() {
-    // Y: 192 to 200 (just below pet GIF, above footer)
-    gfx->fillRect(4, 192, LCD_WIDTH - 8, 8, COLOR_PET_BG);
-    if (millis() < pet.statusMsgEndTime && strlen(pet.statusMsg) > 0) {
-        int len = strlen(pet.statusMsg);
-        gfx->setTextColor(COLOR_BLACK);
-        gfx->setTextSize(1);
-        int textW = len * 6;
-        int tx = max(4, (LCD_WIDTH - textW) / 2);
-        gfx->setCursor(tx, 192);
-        gfx->print(pet.statusMsg);
+void drawWashBubble(lgfx::LGFX_Sprite &g, unsigned long now) {
+    if (!wash.bubbleActive) return;
+    int cx = wash.bubbleX;
+    int cy = wash.bubbleY;
+
+    g.drawCircle(cx, cy, 18, COLOR_BUBBLE_RIM);
+    g.fillCircle(cx, cy, 16, COLOR_SOAP);
+    g.fillCircle(cx - 5, cy - 5, 3, COLOR_WHITE);
+
+    g.setTextColor(COLOR_WHITE);
+    g.setTextSize(2);
+    g.setCursor(cx - 5, cy - 7);
+    g.print(wash.bubbleButton + 1);
+
+    if (now < wash.wrongUntil) {
+        g.drawCircle(cx, cy, 21, COLOR_RED);
     }
 }
 
-void drawPetScreen(bool fullRedraw) {
-    if (fullRedraw) {
-        petDrawX = PET_GIF_X;
-        petDrawY = PET_GIF_Y;
-        gfx->fillScreen(COLOR_PET_BG); // Light gray fur background!
-        drawStatusBar();
-        drawFooter();
+void drawPlayArrows(lgfx::LGFX_Sprite &g) {
+    if (play.celebrating || play.nextRoundAt != 0) return;
+    // Outline-only arrows: the animated character shows through the arrow
+    // instead of being covered by a solid shape on the fur-gray background.
+    if (play.targetDirection == 0) {
+        g.drawTriangle(8, 108, 38, 86, 38, 130, COLOR_HAPPY);
+        g.drawTriangle(9, 108, 37, 88, 37, 128, COLOR_HAPPY);
+        g.drawRect(38, 98, 14, 20, COLOR_HAPPY);
+    } else {
+        g.drawTriangle(232, 108, 202, 86, 202, 130, COLOR_HAPPY);
+        g.drawTriangle(231, 108, 203, 88, 203, 128, COLOR_HAPPY);
+        g.drawRect(188, 98, 14, 20, COLOR_HAPPY);
     }
-    drawSpeechBubble();
+}
+
+void drawPlayScore(lgfx::LGFX_Sprite &g) {
+    g.fillRect(10, 205, 220, 26, COLOR_PET_BG);
+    g.setTextColor(COLOR_BLACK);
+    g.setTextSize(2);
+    g.setCursor(20, 210);
+    g.printf("SCORE: %d / 3", play.score);
+    if (play.celebrating || play.nextRoundAt != 0) {
+        g.setTextSize(1);
+        g.setCursor(166, 214);
+        g.print(play.celebrating ? "YAY!" : "MISS!");
+    }
+}
+
+void render(unsigned long now) {
+    scene.fillScreen(COLOR_PET_BG);
+
+    switch (mode) {
+        case MODE_PET:
+            drawStatusBar(scene);
+            gifLayer.draw(petDrawX, petDrawY);
+            drawSpeechBubble(scene, now);
+            drawFooter(scene);
+            break;
+
+        case MODE_GAME_FEED:
+            drawGameHeader(scene, COLOR_HUNGER, "FEED KEKUSIS!");
+            scene.setTextColor(COLOR_HUNGER);
+            scene.setTextSize(2);
+            scene.setCursor(48, 20);
+            scene.printf("SCORE: %d / 8", feed.score);
+            gifLayer.draw(petDrawX, petDrawY);
+            drawTreat(scene);
+            break;
+
+        case MODE_GAME_WASH:
+            drawGameHeader(scene, COLOR_CLEAN, "WASH KEKUSIS!");
+            scene.setTextColor(COLOR_CLEAN);
+            scene.setTextSize(2);
+            scene.setCursor(48, 20);
+            scene.printf("SCRUB: %d / 6", wash.score);
+            gifLayer.draw(petDrawX, petDrawY);
+            drawSoapSpots(scene);
+            drawWashBubble(scene, now);
+            break;
+
+        case MODE_GAME_PLAY:
+            drawGameHeader(scene, COLOR_HAPPY, "MATCH KEKUSIS!");
+            gifLayer.draw(petDrawX, petDrawY);
+            drawPlayArrows(scene);
+            drawPlayScore(scene);
+            break;
+    }
+
+    // One atomic update: the panel never sees a partially composed frame.
+    scene.pushSprite(0, 0);
+    lcd.waitDMA();               // scenePixels may be reused next frame
 }
 
 // ==========================================
-// Treat Rendering for Food Minigame
+// Minigame state machines (no blocking delays)
 // ==========================================
-void drawFeedScore() {
-    // Dedicated header banner at Y: 0 to 36 (completely above falling treats!)
-    gfx->fillRect(0, 0, LCD_WIDTH, 36, COLOR_BG);
-    gfx->drawFastHLine(0, 36, LCD_WIDTH, COLOR_BORDER);
-    gfx->setTextColor(COLOR_HUNGER);
-    gfx->setTextSize(2);
-    // Center "SCORE: X / 8" (144px width in 240px screen)
-    gfx->setCursor(48, 10);
-    gfx->printf("SCORE: %d / %d", feedScore, feedTreatsTotal);
+void returnToPetMode(PetEmotion emotion, const char *message,
+                     unsigned long messageMs, unsigned long overrideMs) {
+    mode = MODE_PET;
+    petDrawX = PET_GIF_X;
+    petDrawY = PET_GIF_Y;
+    pet.triggerEmotionOverride(emotion, overrideMs);
+    pet.setStatus(message, messageMs);
+    gifLayer.open(emotion);
+    savePetState();
 }
 
-void drawTreat(int x, int y, int type) {
-    if (y < 42) return; // Never render over the header boundary
-    // Draw bitmap sprite from PROGMEM treat array
-    int spriteIdx = constrain(type, 0, NUM_TREAT_TYPES - 1);
-    const uint16_t *spriteData = (const uint16_t *)pgm_read_ptr(&treat_sprites[spriteIdx]);
-    int drawX = x - TREAT_SPRITE_W / 2;
-    int drawY = y - TREAT_SPRITE_H / 2;
-    gfx->draw16bitRGBBitmap(drawX, drawY, spriteData, TREAT_SPRITE_W, TREAT_SPRITE_H);
-}
-
-void eraseTreat(int x, int y) {
-    // Erase the full sprite area (16x16 centered on x,y) plus 2px margin
-    int drawX = x - TREAT_SPRITE_W / 2 - 1;
-    int drawY = y - TREAT_SPRITE_H / 2 - 1;
-    int eraseW = TREAT_SPRITE_W + 2;
-    int eraseH = TREAT_SPRITE_H + 2;
-    // Clamp to below header boundary
-    int top = max(37, drawY);
-    int bottom = min(LCD_HEIGHT, drawY + eraseH);
-    if (bottom > top) {
-        gfx->fillRect(drawX, top, eraseW, bottom - top, COLOR_PET_BG);
-    }
-}
-
-// ==========================================
-// Minigame 1: FALLING TREATS (Smooth, Non-lagging, Non-repeating lanes)
-// ==========================================
 void startFeedGame() {
-    currentMode = MODE_GAME_FEED;
-    feedTreatsTotal = 8;
-    feedTreatsSpawned = 0;
-    feedScore = 0;
-    petLane = 1;
-    lastTreatLane = -1;
-
-    // Position pet at bottom of screen
-    petDrawX = laneX[petLane] - (PET_GIF_W / 2);
+    mode = MODE_GAME_FEED;
+    feed.lane = 1;
+    feed.x = laneX[feed.lane];
+    feed.y = 44;
+    feed.spawned = 0;
+    feed.score = 0;
+    feed.active = false;
+    feed.nextSpawnAt = millis() + 300;
+    feed.lastMoveAt = millis();
+    feed.finishAt = 0;
+    petDrawX = laneX[feed.lane] - PET_GIF_W / 2;
     petDrawY = 88;
-
-    currentTreat.active = false;
-    nextTreatSpawnTime = millis() + 300;
-
-    gfx->fillScreen(COLOR_PET_BG); // Fur background!
-
-    // Dedicated banner (Y: 0 to 36)
-    drawFeedScore();
-
-    loadPetGif(EMOTION_IDLE);
-    gif.playFrame(true, NULL);
+    gifLayer.open(EMOTION_IDLE);
 
     Serial.println("\n>>> MINIGAME: FAST FALLING TREATS STARTED <<<");
-    Serial.println("Treats falling! Press [1], [2], [3], [4] on keyboard to catch them!");
+    Serial.println("Treats falling! Press [1], [2], [3], [4] to catch them!");
 }
 
-void updateFeedGame() {
-    unsigned long now = millis();
-
-    // 2. Spawn a new treat with guaranteed variety
-    if (!currentTreat.active && feedTreatsSpawned < feedTreatsTotal) {
-        if (now >= nextTreatSpawnTime) {
-            currentTreat.active = true;
-
-            int offset = 1 + random(3);
-            currentTreat.lane = (lastTreatLane == -1) ? random(4) : (lastTreatLane + offset) % 4;
-            lastTreatLane = currentTreat.lane;
-
-            currentTreat.x = laneX[currentTreat.lane];
-            currentTreat.y = 44;
-            currentTreat.prevY = 44;
-            currentTreat.type = random(NUM_TREAT_TYPES);
-            currentTreat.speed = 6 + (feedTreatsSpawned * 2 / 4);
-            feedTreatsSpawned++;
-            Serial.printf("-> Treat #%d falling in Lane %d! (Speed: %d)\n", feedTreatsSpawned, currentTreat.lane + 1, currentTreat.speed);
-        }
-    }
-
-    // 3. Erase old treat position with fur color BEFORE moving
-    // This clears the trail. The GIF exclusion zone then moves to the new position,
-    // so the GIF naturally repaints the erased area on the next frame.
-    if (currentTreat.active) {
-        // Erase old sprite footprint with fur color
-        int eraseTop = max(37, currentTreat.y - TREAT_SPRITE_H / 2);
-        int eraseBot = min(LCD_HEIGHT, currentTreat.y + TREAT_SPRITE_H / 2);
-        gfx->fillRect(currentTreat.x - TREAT_SPRITE_W / 2, eraseTop,
-                      TREAT_SPRITE_W, eraseBot - eraseTop, COLOR_PET_BG);
-        currentTreat.prevY = currentTreat.y;
-        currentTreat.y += currentTreat.speed;
-    }
-
-    // 1. Play GIF frame AFTER erasing and moving — exclusion zone now at new Y,
-    // GIF repaints the erased old area cleanly.
-    if (gifLoaded && now >= nextFrameTime) {
-        int iDelay = 0;
-        if (!gif.playFrame(true, &iDelay)) {
-            loadPetGif(pet.overrideEndTime > now ? pet.overrideEmotion : EMOTION_IDLE);
-        } else {
-            nextFrameTime = now + iDelay;
-        }
-    }
-
-    // 4. Draw treat at new position on top of GIF (exclusion zone keeps it flicker-free)
-    if (currentTreat.active) {
-        // Catch window
-        if (currentTreat.y >= 135 && currentTreat.y <= 165) {
-            if (currentTreat.lane == petLane) {
-                // CAUGHT! Clear treat area and celebrate
-                gfx->fillRect(currentTreat.x - TREAT_SPRITE_W/2, currentTreat.y - TREAT_SPRITE_H/2,
-                               TREAT_SPRITE_W, TREAT_SPRITE_H, COLOR_PET_BG);
-                currentTreat.active = false;
-                feedScore++;
-                pet.hunger = min(HUNGER_MAX, pet.hunger + 14);
-                pet.happiness = min(HAPPINESS_MAX, pet.happiness + 8);
-
-                drawFeedScore();
-
-                // Brief happy flash on catch!
-                loadPetGif(EMOTION_HAPPY);
-                pet.triggerEmotionOverride(EMOTION_HAPPY, 450);
-                gif.playFrame(true, NULL);
-
-                Serial.printf("-> YUM! Caught in Lane %d! Score: %d/%d\n", petLane + 1, feedScore, feedTreatsTotal);
-                nextTreatSpawnTime = now + 160;
-            }
-        }
-
-        // Miss check
-        if (currentTreat.active && currentTreat.y > 180) {
-            gfx->fillRect(currentTreat.x - TREAT_SPRITE_W/2, currentTreat.y - TREAT_SPRITE_H/2,
-                           TREAT_SPRITE_W, TREAT_SPRITE_H, COLOR_PET_BG);
-            currentTreat.active = false;
-            Serial.printf("-> MISSED in Lane %d!\n", currentTreat.lane + 1);
-            nextTreatSpawnTime = now + 140;
-        }
-
-        if (currentTreat.active) {
-            drawTreat(currentTreat.x, currentTreat.y, currentTreat.type);
-        }
-    }
-
-    // 5. Check if game finished
-    if (!currentTreat.active && feedTreatsSpawned >= feedTreatsTotal) {
-        delay(400);
-        currentMode = MODE_PET;
-        petDrawX = PET_GIF_X;
-        petDrawY = PET_GIF_Y;
-
-        pet.triggerEmotionOverride(feedScore >= 4 ? EMOTION_HAPPY : EMOTION_IDLE, 3500);
+void updateFeedGame(unsigned long now) {
+    if (feed.finishAt != 0 && now >= feed.finishAt) {
+        bool success = feed.score >= 4;
         char summary[32];
-        snprintf(summary, sizeof(summary), "Caught %d/%d! Yum!", feedScore, feedTreatsTotal);
-        pet.setStatus(summary, 3000);
-
-        drawPetScreen(true);
-        loadPetGif(feedScore >= 4 ? EMOTION_HAPPY : EMOTION_IDLE);
-        savePetState();
-        printPetStatusSerial();
+        snprintf(summary, sizeof(summary), "Caught %d/%d! Yum!", feed.score, 8);
+        returnToPetMode(success ? EMOTION_HAPPY : EMOTION_IDLE,
+                        summary, 3000, 3500);
         return;
     }
 
-    delay(8);
-}
+    if (!feed.active && feed.spawned < 8 && now >= feed.nextSpawnAt) {
+        feed.active = true;
+        int offset = 1 + random(3);
+        feed.lane = (feed.lane < 0) ? random(4) : (feed.lane + offset) % 4;
+        feed.x = laneX[feed.lane];
+        feed.y = 44;
+        feed.type = random(NUM_TREAT_TYPES);
+        feed.speed = 3 + (feed.spawned / 4);
+        feed.spawned++;
+        feed.lastMoveAt = now;
+        Serial.printf("-> Treat #%d falling in Lane %d! (Speed: %d)\n",
+                      feed.spawned, feed.lane + 1, feed.speed);
+    }
 
-void handleFeedGameInput(int btnIndex) {
-    if (btnIndex < 0 || btnIndex > 3) return;
+    if (!feed.active && feed.spawned >= 8 && feed.finishAt == 0) {
+        feed.finishAt = now + 400;
+    }
 
-    if (petLane != btnIndex) {
-        // Clear previous pet area with light gray fur
-        gfx->fillRect(0, petDrawY, LCD_WIDTH, PET_GIF_H, COLOR_PET_BG);
+    if (!feed.active) return;
 
-        petLane = btnIndex;
-        petDrawX = laneX[petLane] - (PET_GIF_W / 2);
+    unsigned long dt = now - feed.lastMoveAt;
+    feed.lastMoveAt = now;
+    if (dt > 50) dt = 50;                 // clamp after long serial/Task stalls
+    int previousY = feed.y;
+    feed.y += (feed.speed * (int)dt) / 16;
 
-        // Immediately rewind and redraw full keyframe at new position to eliminate glitches!
-        loadPetGif(pet.overrideEndTime > millis() ? pet.overrideEmotion : EMOTION_IDLE);
-        gif.playFrame(true, NULL);
-
-        Serial.printf("-> Kekusis moved to Lane %d!\n", petLane + 1);
+    bool crossedCatchBand = previousY <= 165 && feed.y >= 135;
+    if (crossedCatchBand && feed.lane == petDrawLane()) {
+        feed.active = false;
+        feed.score++;
+        pet.hunger = min(HUNGER_MAX, pet.hunger + 14);
+        pet.happiness = min(HAPPINESS_MAX, pet.happiness + 8);
+        pet.triggerEmotionOverride(EMOTION_HAPPY, 450);
+        gifLayer.open(EMOTION_HAPPY);
+        feed.nextSpawnAt = now + 160;
+        Serial.printf("-> YUM! Caught in Lane %d! Score: %d/%d\n",
+                      feed.lane + 1, feed.score, 8);
+    } else if (feed.y > 180) {
+        feed.active = false;
+        feed.nextSpawnAt = now + 140;
+        Serial.printf("-> MISSED in Lane %d!\n", feed.lane + 1);
     }
 }
 
-// ==========================================
-// Minigame 2: SEQUENTIAL BUBBLE POP (6 bubbles, sponge effect, soap residue)
-// ==========================================
-void drawWashScore() {
-    gfx->fillRect(0, 0, LCD_WIDTH, 36, COLOR_BG);
-    gfx->drawFastHLine(0, 36, LCD_WIDTH, COLOR_BORDER);
-    gfx->setTextColor(COLOR_CLEAN);
-    gfx->setTextSize(2);
-    gfx->setCursor(22, 10);
-    gfx->printf("SCRUB: %d / %d", washScore, washTotalBubbles);
-}
-
-void drawSoapSpots() {
-    // Draw all soap residue spots (light blue bubbly circles)
-    for (int i = 0; i < washTotalBubbles; i++) {
-        if (washSoapSpots[i].active) {
-            int sx = washSoapSpots[i].x;
-            int sy = washSoapSpots[i].y;
-            gfx->fillCircle(sx, sy, 8, 0xFBB8);  // Soft pink soap
-            gfx->fillCircle(sx - 3, sy - 2, 2, COLOR_WHITE); // Soap glint
-            gfx->fillCircle(sx + 4, sy + 3, 1, 0xFE19);  // Pink highlight
-        }
+int petDrawLane() {
+    // petDrawX is derived from laneX[petLane] - PET_GIF_W / 2.
+    for (int i = 0; i < 4; i++) {
+        if (petDrawX == laneX[i] - PET_GIF_W / 2) return i;
     }
+    return -1;
 }
 
-void spawnNextWashBubble() {
-    if (washCurrentBubble >= washTotalBubbles) return;
-    
-    // Random position in the play area (avoid header and edges)
-    washBubbleX = 30 + random(180);  // 30 to 210
-    washBubbleY = 55 + random(100);  // 55 to 155
-    washBubbleBtn = random(4);       // 0-3 (displayed as 1-4)
-    washBubbleActive = true;
+void handleFeedInput(int button) {
+    if (button < 0 || button > 3) return;
+    petDrawX = laneX[button] - PET_GIF_W / 2;
+    Serial.printf("-> Kekusis moved to Lane %d!\n", button + 1);
 }
 
-void drawCurrentBubble() {
-    if (!washBubbleActive) return;
-    
-    int cx = washBubbleX;
-    int cy = washBubbleY;
-    int r = 18;
-    
-    // Outer bubble rim (pink)
-    gfx->drawCircle(cx, cy, r, 0xF81F);  // Magenta/pink rim
-    // Pink soapy fill
-    gfx->fillCircle(cx, cy, r - 2, 0xFBB8);  // Soft pink fill
-    // White glint
-    gfx->fillCircle(cx - 5, cy - 5, 3, COLOR_WHITE);
-    
-    // Large bold button number
-    gfx->setTextColor(COLOR_WHITE);
-    gfx->setTextSize(2);
-    gfx->setCursor(cx - 5, cy - 7);
-    gfx->printf("%d", washBubbleBtn + 1);
-}
-
-void drawSponge(int x, int y) {
-    // Removed — sponge no longer shown
+void spawnWashBubble() {
+    wash.bubbleX = 30 + random(180);
+    wash.bubbleY = 55 + random(100);
+    wash.bubbleButton = random(4);
+    wash.bubbleActive = true;
 }
 
 void startWashGame() {
-    currentMode = MODE_GAME_WASH;
-    washTotalBubbles = 6;
-    washCurrentBubble = 0;
-    washScore = 0;
-    washBubbleActive = false;
-    washSpongeShowing = false;
-    
-    for (int i = 0; i < 6; i++) {
-        washSoapSpots[i].active = false;
-    }
-
+    mode = MODE_GAME_WASH;
+    wash.score = 0;
+    wash.currentBubble = 0;
+    wash.bubbleActive = false;
+    wash.wrongUntil = 0;
+    wash.finishAt = 0;
+    for (int i = 0; i < 6; i++) wash.spots[i].active = false;
     petDrawX = PET_GIF_X;
     petDrawY = PET_GIF_Y;
-
-    gfx->fillScreen(COLOR_PET_BG);
-    drawWashScore();
-
-    loadPetGif(EMOTION_DIRTY);
-    gif.playFrame(true, NULL);
-    
-    // Spawn first bubble
-    spawnNextWashBubble();
-    drawCurrentBubble();
+    gifLayer.open(EMOTION_DIRTY);
+    spawnWashBubble();
 
     Serial.println("\n>>> MINIGAME: BUBBLE SCRUB STARTED <<<");
-    Serial.println("Pop 6 bubbles! Press the matching button [1-4] to scrub each one!");
+    Serial.println("Pop 6 bubbles! Press the matching button [1-4]!");
 }
 
-void updateWashGame() {
-    unsigned long now = millis();
-
-    // 1. Keep Pet GIF playing (dirty animation)
-    // GIFDraw exclusion zones protect the active bubble and all soap spots
-    if (gifLoaded && now >= nextFrameTime) {
-        int iDelay = 0;
-        if (!gif.playFrame(true, &iDelay)) {
-            loadPetGif(EMOTION_DIRTY);
-        } else {
-            nextFrameTime = now + iDelay;
-        }
-    }
-    
-    // 2. Redraw current bubble and soap spots on top of GIF
-    if (washBubbleActive) {
-        drawCurrentBubble();
-    }
-    drawSoapSpots();
-
-    delay(10);
-}
-
-void handleWashGameInput(int btnIndex) {
-    if (!washBubbleActive) return;
-    if (btnIndex < 0 || btnIndex > 3) return;
-    
-    if (btnIndex == washBubbleBtn) {
-        // Correct! Pop the bubble
-        washBubbleActive = false;
-        washScore++;
-        
-        // Record soap spot at bubble position (exclusion zone will keep it visible)
-        washSoapSpots[washCurrentBubble].x = washBubbleX;
-        washSoapSpots[washCurrentBubble].y = washBubbleY;
-        washSoapSpots[washCurrentBubble].active = true;
-        
-        washCurrentBubble++;
-        
-        // Clear the bubble area with fur color
-        gfx->fillCircle(washBubbleX, washBubbleY, 22, COLOR_PET_BG);
-        
-        // Immediately force a GIF frame to repaint under where the bubble was,
-        // BEFORE the soap spot exclusion kicks in — no gray gap!
-        gif.playFrame(true, NULL);
-        
-        // Draw soap spot on top of freshly repainted GIF
-        drawSoapSpots();
-        drawWashScore();
-        
-        Serial.printf("-> POPPED Bubble %d! (btn %d) (%d/%d done)\n", 
-                       washCurrentBubble, btnIndex + 1, washScore, washTotalBubbles);
-
-        // Check game complete
-        if (washCurrentBubble >= washTotalBubbles) {
-            delay(300);
-            pet.cleanliness = min(CLEANLINESS_MAX, pet.cleanliness + 50);
-            pet.happiness = min(HAPPINESS_MAX, pet.happiness + 20);
-            currentMode = MODE_PET;
-            petDrawX = PET_GIF_X;
-            petDrawY = PET_GIF_Y;
-
-            pet.triggerEmotionOverride(EMOTION_WASHING, 4000);
-            pet.setStatus("Squeaky clean!", 3500);
-            drawPetScreen(true);
-            loadPetGif(EMOTION_WASHING);
-            savePetState();
-            printPetStatusSerial();
-            return;
-        }
-        
-        // Spawn next bubble
-        spawnNextWashBubble();
-        drawCurrentBubble();
-    } else {
-        // Wrong button — flash red ring
-        gfx->drawCircle(washBubbleX, washBubbleY, 20, COLOR_RED);
-        delay(80);
-        drawCurrentBubble(); // Redraw normal
-        Serial.printf("-> WRONG! Need button %d, got %d\n", washBubbleBtn + 1, btnIndex + 1);
+void updateWashGame(unsigned long now) {
+    if (wash.finishAt != 0 && now >= wash.finishAt) {
+        pet.cleanliness = min(CLEANLINESS_MAX, pet.cleanliness + 50);
+        pet.happiness = min(HAPPINESS_MAX, pet.happiness + 20);
+        returnToPetMode(EMOTION_WASHING, "Squeaky clean!", 3500, 4000);
     }
 }
 
-// ==========================================
-// Minigame 3: DODGE & PLAY (Direction Match)
-// ==========================================
+void handleWashInput(int button) {
+    if (!wash.bubbleActive || button < 0 || button > 3) return;
+
+    if (button != wash.bubbleButton) {
+        wash.wrongUntil = millis() + 140;
+        Serial.printf("-> WRONG! Need button %d, got %d\n",
+                      wash.bubbleButton + 1, button + 1);
+        return;
+    }
+
+    wash.bubbleActive = false;
+    wash.score++;
+    wash.spots[wash.currentBubble].x = wash.bubbleX;
+    wash.spots[wash.currentBubble].y = wash.bubbleY;
+    wash.spots[wash.currentBubble].active = true;
+    wash.currentBubble++;
+
+    Serial.printf("-> POPPED Bubble %d! (btn %d) (%d/%d done)\n",
+                  wash.currentBubble, button + 1, wash.score, 6);
+
+    if (wash.currentBubble >= 6) {
+        wash.finishAt = millis() + 300;
+        return;
+    }
+    spawnWashBubble();
+}
+
 void startPlayGame() {
-    currentMode = MODE_GAME_PLAY;
-    playRoundsLeft = 3;
-    playScore = 0;
-    playTargetDir = random(2);
-    playRoundStartTime = millis();
-    playHappyMoment = false;
-    playHappyUntil = 0;
-    playNextRoundTime = 0;
-
-    petDrawX = 0; // Centered (not moved horizontally)
+    mode = MODE_GAME_PLAY;
+    play.roundsLeft = 3;
+    play.score = 0;
+    play.targetDirection = random(2);
+    play.celebrating = false;
+    play.celebrateUntil = 0;
+    play.nextRoundAt = 0;
+    petDrawX = 0;
     petDrawY = PET_GIF_Y;
-
-    gfx->fillScreen(COLOR_PET_BG); // Fur background
-
-    // Large Header
-    gfx->fillRect(0, 0, LCD_WIDTH, 36, COLOR_BG);
-    gfx->drawFastHLine(0, 36, LCD_WIDTH, COLOR_BORDER);
-    gfx->setTextColor(COLOR_HAPPY);
-    gfx->setTextSize(2);
-    gfx->setCursor(24, 10);
-    gfx->print("MATCH KEKUSIS!");
-
-    // Load authentic 20-degree rotated face matching direction
-    loadPetGif(playTargetDir == 0 ? EMOTION_PLAY_LEFT : EMOTION_PLAY_RIGHT);
+    gifLayer.open(play.targetDirection == 0 ? EMOTION_PLAY_LEFT
+                                            : EMOTION_PLAY_RIGHT);
 
     Serial.println("\n>>> MINIGAME: PLAY STARTED <<<");
-    Serial.println("Look at prompt: Press [1] for LEFT, [2] for RIGHT!");
+    Serial.println("Look at the arrow: [1] LEFT, [2] RIGHT!");
 }
 
-void updatePlayGame() {
-    unsigned long now = millis();
-
-    // 1. Keep Pet GIF playing
-    if (gifLoaded && now >= nextFrameTime) {
-        int iDelay = 0;
-        if (!gif.playFrame(true, &iDelay)) {
-            loadPetGif(playHappyMoment ? EMOTION_HAPPY : (playTargetDir == 0 ? EMOTION_PLAY_LEFT : EMOTION_PLAY_RIGHT));
-        } else {
-            nextFrameTime = now + iDelay;
-        }
-    }
-
-    // 2. Handle happy score moment (split second!)
-    if (playHappyMoment) {
-        if (now >= playHappyUntil) {
-            playHappyMoment = false;
-            playRoundsLeft--;
-            if (playRoundsLeft > 0) {
-                playTargetDir = random(2);
-                petDrawX = 0;
-                gfx->fillRect(0, 37, LCD_WIDTH, 168, COLOR_PET_BG);
-                loadPetGif(playTargetDir == 0 ? EMOTION_PLAY_LEFT : EMOTION_PLAY_RIGHT);
-            } else {
-                // Game complete
-                currentMode = MODE_PET;
-                petDrawX = PET_GIF_X;
-                petDrawY = PET_GIF_Y;
-
-                pet.happiness = min(HAPPINESS_MAX, pet.happiness + 30);
-                pet.energy = max(0, pet.energy - 10);
-                pet.triggerEmotionOverride(EMOTION_HAPPY, 4000);
-                pet.setStatus(playScore >= 2 ? "You matched me! Yay!" : "Good try! Again soon!", 3500);
-
-                drawPetScreen(true);
-                loadPetGif(EMOTION_HAPPY);
-                savePetState();
-                printPetStatusSerial();
-                return;
-            }
-        }
-        return; // Keep showing happy animation while celebrating
-    }
-
-    // 3. Handle brief pause after mismatch
-    if (playNextRoundTime > 0) {
-        if (now >= playNextRoundTime) {
-            playNextRoundTime = 0;
-            playRoundsLeft--;
-            if (playRoundsLeft > 0) {
-                playTargetDir = random(2);
-                petDrawX = 0;
-                gfx->fillRect(0, 37, LCD_WIDTH, 168, COLOR_PET_BG);
-                loadPetGif(playTargetDir == 0 ? EMOTION_PLAY_LEFT : EMOTION_PLAY_RIGHT);
-            } else {
-                currentMode = MODE_PET;
-                petDrawX = PET_GIF_X;
-                petDrawY = PET_GIF_Y;
-
-                pet.happiness = min(HAPPINESS_MAX, pet.happiness + 30);
-                pet.energy = max(0, pet.energy - 10);
-                pet.triggerEmotionOverride(playScore >= 2 ? EMOTION_HAPPY : EMOTION_IDLE, 4000);
-                pet.setStatus(playScore >= 2 ? "You matched me! Yay!" : "Good try! Again soon!", 3500);
-
-                drawPetScreen(true);
-                loadPetGif(playScore >= 2 ? EMOTION_HAPPY : EMOTION_IDLE);
-                savePetState();
-                printPetStatusSerial();
-                return;
-            }
-        }
+void advancePlayRound() {
+    play.roundsLeft--;
+    if (play.roundsLeft <= 0) {
+        bool success = play.score >= 2;
+        returnToPetMode(success ? EMOTION_HAPPY : EMOTION_IDLE,
+                        success ? "You matched me! Yay!" : "Good try! Again soon!",
+                        3500, 4000);
         return;
     }
-
-    // 4. Large arrows pointing left/right (drawn on fur, excluded in GIFDraw so zero Z-fight)
-    // The GIF naturally repaints the non-excluded side — no explicit fillRect needed!
-    if (playTargetDir == 0) {
-        // Arrow LEFT on left side of pet
-        gfx->fillTriangle(8, 108, 38, 86, 38, 130, COLOR_HAPPY);
-        gfx->fillRect(38, 98, 14, 20, COLOR_HAPPY);
-    } else {
-        // Arrow RIGHT on right side of pet
-        gfx->fillTriangle(232, 108, 202, 86, 202, 130, COLOR_HAPPY);
-        gfx->fillRect(188, 98, 14, 20, COLOR_HAPPY);
-    }
-
-    // Bottom round status in TextSize 2
-    gfx->fillRect(10, 205, 220, 26, COLOR_PET_BG);
-    gfx->setTextColor(COLOR_BLACK);
-    gfx->setTextSize(2);
-    gfx->setCursor(20, 210);
-    gfx->printf("SCORE: %d / 3", playScore);
-
-    delay(20);
+    play.targetDirection = random(2);
+    petDrawX = 0;
+    gifLayer.open(play.targetDirection == 0 ? EMOTION_PLAY_LEFT
+                                            : EMOTION_PLAY_RIGHT);
 }
 
-void handlePlayGameInput(int btnIndex) {
-    if (btnIndex != 0 && btnIndex != 1) return;
-    if (playHappyMoment || playNextRoundTime > 0) return; // Prevent spamming during transition
+void updatePlayGame(unsigned long now) {
+    if (play.celebrating && now >= play.celebrateUntil) {
+        play.celebrating = false;
+        advancePlayRound();
+        return;
+    }
+    if (play.nextRoundAt != 0 && now >= play.nextRoundAt) {
+        play.nextRoundAt = 0;
+        advancePlayRound();
+    }
+}
 
-    bool correct = (btnIndex == playTargetDir);
-    if (correct) {
-        playScore++;
-        playHappyMoment = true;
-        playHappyUntil = millis() + 450; // SPLIT SECOND (450ms)!
-        petDrawX = PET_GIF_X; // Center face
-        loadPetGif(EMOTION_HAPPY); // Turn HAPPY!
+void handlePlayInput(int button) {
+    if (button > 1) return;
+    if (play.celebrating || play.nextRoundAt != 0) return;
 
-        // Clear arrows and show celebratory text
-        gfx->fillRect(0, 37, LCD_WIDTH, 168, COLOR_PET_BG);
-        gfx->fillRect(10, 205, 220, 26, COLOR_PET_BG);
-        gfx->setTextColor(COLOR_BLACK);
-        gfx->setTextSize(2);
-        gfx->setCursor(20, 210);
-        gfx->printf("SCORE: %d / 3  YAY!", playScore);
-
-        Serial.printf("-> MATCH! Correct direction! Score: %d/3\n", playScore);
+    if (button == play.targetDirection) {
+        play.score++;
+        play.celebrating = true;
+        play.celebrateUntil = millis() + 450;
+        gifLayer.open(EMOTION_HAPPY);
+        Serial.printf("-> MATCH! Score: %d/3\n", play.score);
     } else {
+        play.nextRoundAt = millis() + 500;
         Serial.println("-> MISMATCH! Wrong direction.");
-        playNextRoundTime = millis() + 500;
-        gfx->fillRect(10, 205, 220, 26, COLOR_PET_BG);
-        gfx->setTextColor(COLOR_BLACK);
-        gfx->setTextSize(2);
-        gfx->setCursor(20, 210);
-        gfx->printf("SCORE: %d / 3  MISS!", playScore);
     }
 }
 
 // ==========================================
-// Central Button Input Handler (Debounced)
+// Input handling
 // ==========================================
-void handleButtonPress(int btnIndex) {
-    static unsigned long lastBtnPressTime[4] = {0, 0, 0, 0};
+void handleButtonPress(int button) {
+    static unsigned long lastPress[4] = {0, 0, 0, 0};
     unsigned long now = millis();
-    if (now - lastBtnPressTime[btnIndex] < 120) {
-        return; // Debounce duplicate triggers within 120ms
-    }
-    lastBtnPressTime[btnIndex] = now;
+    if (now - lastPress[button] < 120) return;
+    lastPress[button] = now;
 
-    Serial.printf("[INPUT] Button %d triggered (via %s)\n", btnIndex + 1, "HW/Serial");
+    Serial.printf("[INPUT] Button %d triggered\n", button + 1);
 
-    if (currentMode == MODE_GAME_FEED) {
-        handleFeedGameInput(btnIndex);
-        return;
-    } else if (currentMode == MODE_GAME_WASH) {
-        handleWashGameInput(btnIndex);
-        return;
-    } else if (currentMode == MODE_GAME_PLAY) {
-        handlePlayGameInput(btnIndex);
+    if (mode == MODE_GAME_FEED) {
+        handleFeedInput(button);
         return;
     }
+    if (mode == MODE_GAME_WASH) {
+        handleWashInput(button);
+        return;
+    }
+    if (mode == MODE_GAME_PLAY) {
+        handlePlayInput(button);
+        return;
+    }
 
-    // Main Pet Mode Actions
-    switch (btnIndex) {
-        case 0: // Button 1: Feed
-            if (pet.isSleeping) {
-                pet.setStatus("Kekusis is asleep!", 2000);
-            } else {
-                startFeedGame();
-            }
+    switch (button) {
+        case 0:
+            if (pet.isSleeping) pet.setStatus("Kekusis is asleep!", 2000);
+            else startFeedGame();
             break;
-
-        case 1: // Button 2: Wash
-            if (pet.isSleeping) {
-                pet.setStatus("Don't splash water!", 2000);
-            } else {
-                startWashGame();
-            }
+        case 1:
+            if (pet.isSleeping) pet.setStatus("Don't splash water!", 2000);
+            else startWashGame();
             break;
-
-        case 2: // Button 3: Play
-            if (pet.isSleeping) {
-                pet.setStatus("Shh! Kekusis is napping.", 2000);
-            } else if (pet.energy < 15) {
-                pet.setStatus("Too tired to play!", 2500);
-            } else {
-                startPlayGame();
-            }
+        case 2:
+            if (pet.isSleeping) pet.setStatus("Shh! Kekusis is napping.", 2000);
+            else if (pet.energy < 15) pet.setStatus("Too tired to play!", 2500);
+            else startPlayGame();
             break;
-
-        case 3: // Button 4: Sleep / Wake Toggle
+        case 3:
             pet.isSleeping = !pet.isSleeping;
-            if (pet.isSleeping) {
-                pet.setStatus("Goodnight! Zzz...", 3000);
-                Serial.println("Kekusis is now SLEEPING.");
-            } else {
-                pet.setStatus("Good morning!", 2500);
-                Serial.println("Kekusis is now AWAKE.");
-            }
-            drawPetScreen(true);
+            pet.setStatus(pet.isSleeping ? "Goodnight! Zzz..." : "Good morning!",
+                          pet.isSleeping ? 3000 : 2500);
             savePetState();
             break;
     }
 }
 
+void pollButtons(unsigned long now) {
+    for (int i = 0; i < 4; i++) {
+        int reading = digitalRead(buttons[i].pin);
+        if (reading != buttons[i].lastState) buttons[i].lastChange = now;
+        if (now - buttons[i].lastChange > BTN_DEBOUNCE_MS &&
+            reading != buttons[i].currentState) {
+            buttons[i].currentState = reading;
+            if (reading == LOW) handleButtonPress(i);
+        }
+        buttons[i].lastState = reading;
+    }
+}
+
 // ==========================================
-// Serial Command Processor & Time Sync
+// Serial command processor
 // ==========================================
+void printPetStatus() {
+    static const char *names[] = {
+        "IDLE", "HAPPY", "HUNGRY", "DIRTY", "EATING",
+        "WASHING", "SLEEPING", "PLAYING"
+    };
+    Serial.printf("\n[PET STATUS] Kekusis -> Hunger: %d%% | Clean: %d%% | "
+                  "Happy: %d%% | Energy: %d%% | Mood: %s | Sleeping: %s\n",
+                  pet.hunger, pet.cleanliness, pet.happiness, pet.energy,
+                  names[pet.currentEmotion], pet.isSleeping ? "YES" : "NO");
+}
+
+void printHelp() {
+    Serial.println("\n========== KEKUSIS TAMAGOTCHI COMMANDS ==========");
+    Serial.println("  1..4 or btn1..btn4      : Emulate hardware buttons");
+    Serial.println("  feed | wash | play       : Start a minigame");
+    Serial.println("  sleep                    : Toggle sleep");
+    Serial.println("  status                   : Print current stats & mood");
+    Serial.println("  anim <name>              : Force an animation");
+    Serial.println("  set <stat> <0-100>       : hunger|clean|happy|energy");
+    Serial.println("  set stats <h> <c> <p> <e>");
+    Serial.println("  TIME <epoch>             : Sync real-world clock");
+    Serial.println("  save | help              : Save state / show this help");
+    Serial.println("==================================================");
+}
+
+PetEmotion emotionFromName(const String &name) {
+    if (name == "happy") return EMOTION_HAPPY;
+    if (name == "hungry") return EMOTION_HUNGRY;
+    if (name == "dirty") return EMOTION_DIRTY;
+    if (name == "eating" || name == "eat") return EMOTION_EATING;
+    if (name == "sleeping" || name == "sleep") return EMOTION_SLEEPING;
+    if (name == "washing" || name == "wash") return EMOTION_WASHING;
+    if (name == "playing" || name == "play") return EMOTION_PLAYING;
+    return EMOTION_IDLE;
+}
+
 void handleSerialCommands() {
     while (Serial.available()) {
         String cmd = Serial.readStringUntil('\n');
         cmd.trim();
         if (cmd.length() == 0) continue;
 
-        if (cmd == "1" || cmd == "btn1" || cmd == "BTN1") {
-            handleButtonPress(0);
-        } else if (cmd == "2" || cmd == "btn2" || cmd == "BTN2") {
-            handleButtonPress(1);
-        } else if (cmd == "3" || cmd == "btn3" || cmd == "BTN3") {
-            handleButtonPress(2);
-        } else if (cmd == "4" || cmd == "btn4" || cmd == "BTN4") {
-            handleButtonPress(3);
-        } else if (cmd.startsWith("time ") || cmd.startsWith("TIME ")) {
-            // Real-time synchronization & offline decay check
-            unsigned long epoch = strtoul(cmd.substring(5).c_str(), NULL, 10);
-            if (epoch > 100000) {
-                struct timeval tv = { (time_t)epoch, 0 };
-                settimeofday(&tv, NULL);
-
-                prefs.begin("kekusis", false);
-                unsigned long lastSavedEpoch = prefs.getULong("last_time", 0);
-                prefs.end();
-
-                if (!timeSynchronized && lastSavedEpoch > 0 && epoch > lastSavedEpoch) {
-                    unsigned long elapsed = epoch - lastSavedEpoch;
-                    Serial.printf("[TIME] Synced! Kekusis was powered down for %lu minutes.\n", elapsed / 60);
-                    pet.applyOfflineDecay(elapsed);
-                    drawPetScreen(true);
-                }
-                timeSynchronized = true;
-                savePetState();
-            }
-        } else if (cmd == "feed") {
-            startFeedGame();
-        } else if (cmd == "wash") {
-            startWashGame();
-        } else if (cmd == "play") {
-            startPlayGame();
-        } else if (cmd == "sleep") {
-            handleButtonPress(3);
-        } else if (cmd == "status") {
-            printPetStatusSerial();
-        } else if (cmd == "save") {
+        if (cmd == "1" || cmd == "btn1" || cmd == "BTN1") handleButtonPress(0);
+        else if (cmd == "2" || cmd == "btn2" || cmd == "BTN2") handleButtonPress(1);
+        else if (cmd == "3" || cmd == "btn3" || cmd == "BTN3") handleButtonPress(2);
+        else if (cmd == "4" || cmd == "btn4" || cmd == "BTN4") handleButtonPress(3);
+        else if (cmd.equalsIgnoreCase("status")) printPetStatus();
+        else if (cmd.equalsIgnoreCase("save")) {
             savePetState();
             Serial.println("State saved to NVS.");
-        } else if (cmd == "help" || cmd == "?") {
-            printSerialHelp();
-        } else if (cmd.startsWith("anim ") || cmd.startsWith("ANIM ")) {
-            String animName = cmd.substring(5);
-            animName.trim();
-            animName.toLowerCase();
-            PetEmotion emo = EMOTION_IDLE;
-            if (animName == "happy") emo = EMOTION_HAPPY;
-            else if (animName == "hungry") emo = EMOTION_HUNGRY;
-            else if (animName == "dirty") emo = EMOTION_DIRTY;
-            else if (animName == "eating" || animName == "eat") emo = EMOTION_EATING;
-            else if (animName == "sleeping" || animName == "sleep") emo = EMOTION_SLEEPING;
-            else if (animName == "washing" || animName == "wash") emo = EMOTION_WASHING;
-            else if (animName == "playing" || animName == "play") emo = EMOTION_PLAYING;
-            else emo = EMOTION_IDLE;
+        }
+        else if (cmd.equalsIgnoreCase("help") || cmd == "?") printHelp();
+        else if (cmd.equalsIgnoreCase("feed")) startFeedGame();
+        else if (cmd.equalsIgnoreCase("wash")) startWashGame();
+        else if (cmd.equalsIgnoreCase("play")) startPlayGame();
+        else if (cmd.equalsIgnoreCase("sleep")) handleButtonPress(3);
+        else if (cmd.startsWith("time ") || cmd.startsWith("TIME ")) {
+            unsigned long epoch = strtoul(cmd.substring(5).c_str(), nullptr, 10);
+            if (epoch <= 100000) continue;
 
-            currentMode = MODE_PET;
+            struct timeval tv = {(time_t)epoch, 0};
+            settimeofday(&tv, nullptr);
+
+            prefs.begin("kekusis", false);
+            unsigned long lastSaved = prefs.getULong("last_time", 0);
+            prefs.end();
+
+            static bool synchronized = false;
+            if (!synchronized && lastSaved > 0 && epoch > lastSaved) {
+                Serial.printf("[TIME] Synced! Kekusis was powered down for %lu minutes.\n",
+                              (epoch - lastSaved) / 60);
+                pet.applyOfflineDecay(epoch - lastSaved);
+            }
+            synchronized = true;
+            savePetState();
+        }
+        else if (cmd.startsWith("anim ") || cmd.startsWith("ANIM ")) {
+            String name = cmd.substring(5);
+            name.trim();
+            name.toLowerCase();
+            PetEmotion emotion = emotionFromName(name);
+            mode = MODE_PET;
             petDrawX = PET_GIF_X;
             petDrawY = PET_GIF_Y;
-            pet.triggerEmotionOverride(emo, 20000); // Override for 20s
-            loadPetGif(emo);
-            drawPetScreen(true);
-            Serial.printf("Playing animation: %s\n", animName.c_str());
-            printPetStatusSerial();
-        } else if (cmd.startsWith("set stats ")) {
+            pet.triggerEmotionOverride(emotion, 20000);
+            gifLayer.open(emotion);
+            Serial.printf("Playing animation: %s\n", name.c_str());
+            printPetStatus();
+        }
+        else if (cmd.startsWith("set stats ")) {
             int h, c, p, e;
             if (sscanf(cmd.substring(10).c_str(), "%d %d %d %d", &h, &c, &p, &e) == 4) {
                 pet.hunger = constrain(h, 0, 100);
@@ -1128,168 +884,95 @@ void handleSerialCommands() {
                 pet.happiness = constrain(p, 0, 100);
                 pet.energy = constrain(e, 0, 100);
                 savePetState();
-                drawPetScreen(true);
-                Serial.printf("Stats updated -> H:%d C:%d P:%d E:%d\n", pet.hunger, pet.cleanliness, pet.happiness, pet.energy);
-                printPetStatusSerial();
+                printPetStatus();
             }
-        } else if (cmd.startsWith("set hunger ")) {
+        }
+        else if (cmd.startsWith("set hunger ")) {
             pet.hunger = constrain(cmd.substring(11).toInt(), 0, 100);
             savePetState();
-            drawPetScreen(true);
-            Serial.printf("Hunger set to %d\n", pet.hunger);
-            printPetStatusSerial();
-        } else if (cmd.startsWith("set clean ")) {
+        }
+        else if (cmd.startsWith("set clean ")) {
             pet.cleanliness = constrain(cmd.substring(10).toInt(), 0, 100);
             savePetState();
-            drawPetScreen(true);
-            Serial.printf("Cleanliness set to %d\n", pet.cleanliness);
-            printPetStatusSerial();
-        } else if (cmd.startsWith("set happy ")) {
+        }
+        else if (cmd.startsWith("set happy ")) {
             pet.happiness = constrain(cmd.substring(10).toInt(), 0, 100);
             savePetState();
-            drawPetScreen(true);
-            Serial.printf("Happiness set to %d\n", pet.happiness);
-            printPetStatusSerial();
-        } else if (cmd.startsWith("set energy ")) {
+        }
+        else if (cmd.startsWith("set energy ")) {
             pet.energy = constrain(cmd.substring(11).toInt(), 0, 100);
             savePetState();
-            drawPetScreen(true);
-            Serial.printf("Energy set to %d\n", pet.energy);
-            printPetStatusSerial();
-        } else {
+        }
+        else {
             Serial.printf("Unknown command: '%s'. Type 'help' for options.\n", cmd.c_str());
         }
     }
 }
 
-void printSerialHelp() {
-    Serial.println("\n========== KEKUSIS TAMAGOTCHI COMMANDS ==========");
-    Serial.println("  1 (or 'btn1')    : Emulate Button 1 [FEED / Action 1]");
-    Serial.println("  2 (or 'btn2')    : Emulate Button 2 [WASH / Action 2]");
-    Serial.println("  3 (or 'btn3')    : Emulate Button 3 [PLAY / Action 3]");
-    Serial.println("  4 (or 'btn4')    : Emulate Button 4 [SLEEP / Action 4]");
-    Serial.println("  status           : Print current stats & mood");
-    Serial.println("  TIME <epoch>     : Sync real-world clock (auto-sent by PC)");
-    Serial.println("  save             : Save pet state to flash memory");
-    Serial.println("  feed / wash / play / sleep");
-    Serial.println("==================================================");
-}
-
-void printPetStatusSerial() {
-    const char *emotionNames[] = {"IDLE", "HAPPY", "HUNGRY", "DIRTY", "EATING", "WASHING", "SLEEPING", "PLAYING"};
-    Serial.printf("\n[PET STATUS] Kekusis -> Hunger: %d%% | Clean: %d%% | Happy: %d%% | Energy: %d%% | Mood: %s | Sleeping: %s\n",
-                  pet.hunger, pet.cleanliness, pet.happiness, pet.energy,
-                  emotionNames[pet.currentEmotion], pet.isSleeping ? "YES" : "NO");
-}
-
 // ==========================================
-// Setup & Main Loop
+// Setup / main loop
 // ==========================================
 void setup() {
     Serial.begin(115200);
-    delay(400);
+    delay(200);
 
     Serial.println("\n==========================================");
     Serial.println("       KEKUSIS TAMAGOTCHI INITIALIZING    ");
     Serial.println("==========================================");
 
-    // Initialize Physical Buttons
-    for (int i = 0; i < 4; i++) {
-        pinMode(buttons[i].pin, INPUT_PULLUP);
-    }
+    for (int i = 0; i < 4; i++) pinMode(buttons[i].pin, INPUT_PULLUP);
 
-    // Initialize Backlight if enabled
-    if (TFT_BL >= 0) {
-        pinMode(TFT_BL, OUTPUT);
-        digitalWrite(TFT_BL, HIGH);
-    }
+    lcd.init();
+    lcd.setRotation(0);
+    lcd.setColorDepth(16);
 
-    // Initialize ST7789 Display
-    if (!gfx->begin()) {
-        Serial.println("ERROR: Display initialization failed!");
-    } else {
-        Serial.println("Display initialized (240x240 ST7789).");
-    }
+    scene.setColorDepth(16);
+    scene.setBuffer(scenePixels, LCD_WIDTH, LCD_HEIGHT);
+    // Firmware sprite/GIF tables are host-order RGB565. Tell LovyanGFX to
+    // interpret raw uint16_t buffers that way when blitting into the sprite.
+    scene.setSwapBytes(true);
+    scene.setTextSize(1);
 
-    // Initialize AnimatedGIF Decoder
-    gif.begin(LITTLE_ENDIAN_PIXELS);
-
-    // Initialize Pet state & load saved NVS state
+    gifLayer.begin();
     pet.init();
     loadPetState();
+    gifLayer.open(pet.currentEmotion);
 
-    // Initial draw
-    drawPetScreen(true);
-    loadPetGif(pet.currentEmotion);
-
-    printSerialHelp();
-    printPetStatusSerial();
+    render(millis());
+    lastRenderAt = millis();
+    printHelp();
+    printPetStatus();
+    Serial.println("Display initialized (240x240 ST7789, LovyanGFX, framebuffered).");
 }
 
 void loop() {
     unsigned long now = millis();
 
-    // 1. Check Serial Commands & Time Sync from PC
     handleSerialCommands();
+    pollButtons(now);
 
-    // 2. Poll Physical Buttons with debounce
-    for (int i = 0; i < 4; i++) {
-        int reading = digitalRead(buttons[i].pin);
-        if (reading != buttons[i].lastState) {
-            buttons[i].lastDebounceTime = now;
-        }
-        if ((now - buttons[i].lastDebounceTime) > BTN_DEBOUNCE_MS) {
-            if (reading != buttons[i].currentState) {
-                buttons[i].currentState = reading;
-                if (buttons[i].currentState == LOW) {
-                    handleButtonPress(i);
-                }
-            }
-        }
-        buttons[i].lastState = reading;
-    }
-
-    // 3. Handle Active Minigames
-    if (currentMode == MODE_GAME_FEED) {
-        updateFeedGame();
-        return;
-    } else if (currentMode == MODE_GAME_WASH) {
-        updateWashGame();
-        return;
-    } else if (currentMode == MODE_GAME_PLAY) {
-        updatePlayGame();
-        return;
-    }
-
-    // 4. Update Pet State & Emotion
-    pet.update(now);
-
-    // If emotion changed, load appropriate GIF
-    if (pet.currentEmotion != activeGifEmotion) {
-        loadPetGif(pet.currentEmotion);
-    }
-
-    // 5. Play GIF Frames
-    if (gifLoaded && now >= nextFrameTime) {
-        int iDelay = 0;
-        if (!gif.playFrame(true, &iDelay)) {
-            loadPetGif(pet.currentEmotion);
-        } else {
-            nextFrameTime = now + iDelay;
+    if (mode == MODE_GAME_FEED) {
+        updateFeedGame(now);
+    } else if (mode == MODE_GAME_WASH) {
+        updateWashGame(now);
+    } else if (mode == MODE_GAME_PLAY) {
+        updatePlayGame(now);
+    } else {
+        pet.update(now);
+        if (pet.currentEmotion != gifLayer.emotion()) {
+            gifLayer.open(pet.currentEmotion);
         }
     }
 
-    // 6. Refresh Status Bar and Speech Bubble periodically
-    static unsigned long lastUiUpdate = 0;
-    if (now - lastUiUpdate > 1000) {
-        lastUiUpdate = now;
-        drawStatusBar();
-        drawSpeechBubble();
+    gifLayer.update(now);
+
+    if (now - lastRenderAt >= FRAME_INTERVAL_MS) {
+        lastRenderAt = now;
+        render(now);
     }
 
-    // 7. Auto-save state to flash memory
-    if (now - lastSaveTime > SAVE_INTERVAL_MS) {
-        lastSaveTime = now;
+    if (now - lastSaveAt >= SAVE_INTERVAL_MS) {
+        lastSaveAt = now;
         savePetState();
     }
 }

@@ -33,7 +33,7 @@ This document outlines the development path for the ESPets ecosystem, from initi
 ## 🛠️ Detailed Development Tracks
 
 ### 🧱 Phase 1: Prototyping (Hardware & Firmware)
-- [ ] **Display:** Validate 1.3" ST7789 IPS LCD with LVGL (60FPS target).
+- [ ] **Display:** Validate 1.3" ST7789 IPS LCD with LovyanGFX (60FPS target).
 - [ ] **Sensors:** Implement QMI8658 IMU reading (Gyro/Accel) for orientation.
 - [ ] **PCB Design:** Design the **"Backpack PCB"** (Connector Module).
     - [ ] Schematic (ESP32 Header -> 4x Pogo Interfaces).
@@ -45,7 +45,7 @@ This document outlines the development path for the ESPets ecosystem, from initi
 ### 🎨 Phase 2: Art & Ecosystem
 - [ ] **Art:** Create the **"Art Bible"** (Color Palette, Pixel Density, Style Guide).
 - [ ] **Animations:** Design 3 starter pets (Idle + Walk) in Aseprite.
-- [ ] **Pipeline:** Create workflow for converting Aseprite exports to LVGL C-arrays.
+- [ ] **Pipeline:** Create workflow for converting Aseprite exports to RGB565 C-arrays / animated GIFs.
 - [ ] **WebSerial:** Implement browser-based firmware flashing tool.
 - [ ] **Cloud:** Setup Firebase/Supabase for "Live Pet State" syncing.
 

@@ -1,4 +1,7 @@
 // Generated Boogaloo font for Adafruit GFX / Arduino_GFX
+// NOTE: Legacy, currently unused by the firmware. It relies on the old
+// Arduino_GFX <gfxfont.h> types and is NOT compatible with LovyanGFX fonts.
+// To use this font again, regenerate it in LovyanGFX's font format first.
 #pragma once
 #include <Arduino.h>
 #include <gfxfont.h>

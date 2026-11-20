@@ -10,7 +10,7 @@
 
 ## 🛠️ Tech Stack
 - **Firmware:** C++ / Arduino Framework / PlatformIO.
-- **UI/Graphics:** **LVGL** (Light and Versatile Graphics Library) for smooth 60FPS animations.
+- **UI/Graphics:** **LovyanGFX** for high-speed SPI rendering of animated pixel-art GIFs and custom UI widgets.
 - **Communication:** **ESP-NOW** for peer-to-peer mesh interaction.
 - **Art:** Retro Pixel Art (16-bit color, 240x240 resolution).
 

@@ -31,12 +31,14 @@ DEFAULT_BAUD = 115200
 
 def find_esp_port():
     ports = list(serial.tools.list_ports.comports())
-    for p in ports:
+    # Exclude Bluetooth virtual serial ports
+    valid = [p for p in ports if "bluetooth" not in p.description.lower()]
+    for p in valid:
         desc = p.description.lower()
-        if any(k in desc for k in ["ch343", "ch340", "cp210", "serial", "uart", "esp"]):
+        if any(k in desc for k in ["ch343", "ch340", "cp210", "ftdi", "esp", "usb"]):
             return p.device
-    if ports:
-        return ports[0].device
+    if valid:
+        return valid[0].device
     return "COM7"
 
 class SerialController:
@@ -125,6 +127,7 @@ def launch_gui(port_name):
     happy_var = tk.IntVar(value=100)
     energy_var = tk.IntVar(value=100)
     mood_var = tk.StringVar(value="IDLE")
+    log_text = None
 
     def parse_status_line(text):
         # [PET STATUS] Kekusis -> Hunger: 99% | Clean: 83% | Happy: 100% | Energy: 80% | Mood: IDLE
@@ -139,16 +142,24 @@ def launch_gui(port_name):
             status_var.set(f"Hunger: {h}% | Clean: {c}% | Happy: {p}% | Energy: {e}% | Mood: {mood}")
 
     def on_rx(text):
-        if "[PET STATUS]" in text:
-            parse_status_line(text)
-        elif "Stats updated" in text or "set to" in text:
-            controller.send_command("status")
-            
-        if log_text:
-            log_text.config(state="normal")
-            log_text.insert(tk.END, text)
-            log_text.see(tk.END)
-            log_text.config(state="disabled")
+        def _update():
+            if "[PET STATUS]" in text:
+                parse_status_line(text)
+            elif "Stats updated" in text or "set to" in text:
+                controller.send_command("status")
+                
+            if log_text is not None:
+                try:
+                    log_text.config(state="normal")
+                    log_text.insert(tk.END, text)
+                    log_text.see(tk.END)
+                    log_text.config(state="disabled")
+                except Exception:
+                    pass
+        try:
+            root.after(0, _update)
+        except Exception:
+            pass
 
     controller = SerialController(port_name, on_receive_callback=on_rx)
 
