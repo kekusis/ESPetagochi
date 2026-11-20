@@ -82,6 +82,7 @@ def main():
     crop_hungry = (28, 10, 344, 210)   # Includes thought bubble -> aspect 1.58
     crop_happy = (20, 15, 335, 175)    # Includes red hearts on both sides
     crop_sleep = (25, 0, 355, 240)     # Includes nightcap and hand-drawn ZZZ
+    crop_sleepy = (15, 5, 355, 215)    # Includes YAWN text at top right -> aspect 1.62
     
     # Check for latest happy GIF
     happy_file = os.path.join(DOWNLOADS_DIR, "happy(1).gif")
@@ -89,6 +90,8 @@ def main():
         happy_file = os.path.join(DOWNLOADS_DIR, "happy.gif")
         
     sleep_file = os.path.join(DOWNLOADS_DIR, "sleeping.gif")
+    sleepy_file = os.path.join(DOWNLOADS_DIR, "sleepy.gif")
+    squint_file = r"C:\Users\pezda\.gemini\antigravity\brain\8155fed1-7058-4969-ae78-4bfdb4de59ab\.user_uploaded\media_1795192970620_f26add97.png"
     
     # 1. Ingest User's Hand-Drawn Wiggly Paint GIFs with full-screen stretch
     anims['idle'] = process_frames(os.path.join(DOWNLOADS_DIR, "idle.gif"), crop_standard)
@@ -107,6 +110,24 @@ def main():
         print(f"Loaded user's authentic sleeping.gif: {len(anims['sleeping'][0])} frames (NO procedural Zs added)")
     else:
         anims['sleeping'] = ([f.copy() for f in happy_frames[:4]], [300]*4)
+        
+    # User's authentic sleepy (yawn) animation
+    if os.path.exists(sleepy_file):
+        anims['sleepy'] = process_frames(sleepy_file, crop_sleepy)
+        print(f"Loaded user's authentic sleepy.gif: {len(anims['sleepy'][0])} frames")
+    else:
+        # Fallback to uploaded PNG
+        uploaded_sleepy = r"C:\Users\pezda\.gemini\antigravity\brain\8155fed1-7058-4969-ae78-4bfdb4de59ab\.user_uploaded\media_1795192970620_34722153.png"
+        if os.path.exists(uploaded_sleepy):
+            sf, _ = process_frames(uploaded_sleepy, crop_sleepy)
+            anims['sleepy'] = (sf * 2, [300, 300])
+            print(f"Loaded user's uploaded sleepy image: {len(anims['sleepy'][0])} frames")
+            
+    # User's authentic squinting cat smile expression
+    if os.path.exists(squint_file):
+        sq_frames, _ = process_frames(squint_file, crop_standard)
+        anims['squint'] = (sq_frames * 2, [350, 350])
+        print(f"Loaded user's authentic squinting expression: {len(anims['squint'][0])} frames")
     
     for name in ['idle', 'happy', 'hungry', 'dirty', 'eating']:
         print(f"Loaded and stretched {name}.gif: {len(anims[name][0])} frames")

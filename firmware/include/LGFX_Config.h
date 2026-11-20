@@ -25,7 +25,7 @@ public:
 
             cfg.spi_host    = SPI2_HOST;          // ESP32-S3: SPI2_HOST / SPI3_HOST
             cfg.spi_mode    = 0;
-            cfg.freq_write  = 40000000;
+            cfg.freq_write  = 80000000;
             cfg.freq_read   = 16000000;
             cfg.spi_3wire   = true;               // ST7789 uses D/C + MOSI (no MISO)
             cfg.use_lock    = true;

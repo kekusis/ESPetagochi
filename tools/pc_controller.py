@@ -187,7 +187,7 @@ def launch_gui(port_name):
     sec1.pack(fill="x", padx=16, pady=6)
 
     last_trigger_time = {1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}
-    DEBOUNCE_DELAY = 0.18
+    DEBOUNCE_DELAY = 0.05
 
     def trigger_key(num):
         now = time.time()
@@ -306,27 +306,29 @@ def launch_gui(port_name):
 
     animations = [
         ("🐱 Idle", "idle", "#334155"),
-        ("❤️ Happy (Hearts)", "happy", "#be185d"),
-        ("🥩 Hungry (Meat)", "hungry", "#c26d05"),
-        ("🧼 Dirty (Messy)", "dirty", "#0e7490"),
-        ("🍎 Eating (Snack)", "eating", "#b91c1c"),
-        ("💤 Sleeping (Cap & Zzz)", "sleeping", "#4338ca"),
-        ("🫧 Washing (Bubbles)", "washing", "#0369a1"),
-        ("🎮 Playing (Tilted)", "playing", "#6d28d9")
+        ("❤️ Happy", "happy", "#be185d"),
+        ("🥩 Hungry", "hungry", "#c26d05"),
+        ("🧼 Dirty", "dirty", "#0e7490"),
+        ("🍎 Eating", "eating", "#b91c1c"),
+        ("💤 Sleep", "sleeping", "#4338ca"),
+        ("🥱 Sleepy", "sleepy", "#475569"),
+        ("😏 Squint", "squint", "#059669"),
+        ("🫧 Wash", "washing", "#0369a1"),
+        ("🎮 Play", "playing", "#6d28d9")
     ]
 
     def trigger_anim(anim_name):
         controller.send_command(f"anim {anim_name}")
 
     for idx, (label, a_name, col) in enumerate(animations):
-        r = idx // 4
-        c = idx % 4
+        r = idx // 5
+        c = idx % 5
         ab = tk.Button(anim_frame, text=label, font=("Segoe UI", 8, "bold"), bg=col, fg="white",
-                       bd=0, padx=4, pady=6, cursor="hand2",
+                       bd=0, padx=2, pady=5, cursor="hand2",
                        command=lambda a=a_name: trigger_anim(a))
-        ab.grid(row=r, column=c, padx=3, pady=3, sticky="nsew")
+        ab.grid(row=r, column=c, padx=2, pady=3, sticky="nsew")
 
-    for c in range(4):
+    for c in range(5):
         anim_frame.columnconfigure(c, weight=1)
 
     # SECTION 4: Serial Monitor & Command Input

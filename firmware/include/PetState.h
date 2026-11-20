@@ -10,6 +10,8 @@ enum PetEmotion {
     EMOTION_EATING,
     EMOTION_WASHING,
     EMOTION_SLEEPING,
+    EMOTION_SLEEPY,
+    EMOTION_SQUINT,
     EMOTION_PLAYING,
     EMOTION_PLAY_LEFT,
     EMOTION_PLAY_RIGHT,
@@ -161,18 +163,21 @@ struct Pet {
         if (!isSleeping && overrideEndTime <= now && now >= nextIdleActionTime) {
             nextIdleActionTime = now + random(IDLE_ACTION_MIN_MS, IDLE_ACTION_MAX_MS);
             if (hunger > 40 && cleanliness > 40 && energy > 30) {
-                int r = random(10);
+                int r = random(12);
                 if (r == 0) {
                     triggerEmotionOverride(EMOTION_HAPPY, 2500);
                     setStatus("*wiggle wiggle*", 2500);
                 } else if (r == 1) {
                     triggerEmotionOverride(EMOTION_PLAYING, 2500);
                     setStatus("*doing tricks*", 2500);
-                } else if (r >= 2 && r <= 5) {
+                } else if (r == 2) {
+                    triggerEmotionOverride(EMOTION_SQUINT, 2500);
+                    setStatus("*purrrr*", 2500);
+                } else if (r >= 3 && r <= 6) {
                     // Love message (no emotion change, just text)
                     setStatus(loveMessage(random(11)), 4000);
                 }
-                // r == 6..9 → stays idle (no override, no message)
+                // r >= 7 → stays idle (no override, no message)
             }
         }
 
@@ -185,8 +190,8 @@ struct Pet {
             currentEmotion = EMOTION_HUNGRY;
         } else if (cleanliness < 25) {
             currentEmotion = EMOTION_DIRTY;
-        } else if (energy < 20) {
-            currentEmotion = EMOTION_SLEEPING;
+        } else if (energy < 25) {
+            currentEmotion = EMOTION_SLEEPY;
         } else if (happiness >= 90) {
             currentEmotion = EMOTION_HAPPY;
         } else {

@@ -21,7 +21,7 @@
 //   * ghosting: moving sprites were "erased" with a solid color over a GIF
 //     frame, leaving holes when the GIF did not repaint that region
 // ==========================================
-#define FRAME_INTERVAL_MS 33
+#define FRAME_INTERVAL_MS 20
 #define SAVE_INTERVAL_MS  30000
 
 static LGFX lcd;
@@ -152,6 +152,8 @@ private:
             case EMOTION_EATING:  length = gif_eating_len;  return gif_eating;
             case EMOTION_WASHING: length = gif_washing_len; return gif_washing;
             case EMOTION_SLEEPING:length = gif_sleeping_len;return gif_sleeping;
+            case EMOTION_SLEEPY:  length = gif_sleepy_len;  return gif_sleepy;
+            case EMOTION_SQUINT:  length = gif_squint_len;  return gif_squint;
             case EMOTION_PLAYING: length = gif_playing_len; return gif_playing;
             case EMOTION_PLAY_LEFT: length = gif_play_left_len; return gif_play_left;
             case EMOTION_PLAY_RIGHT:length = gif_play_right_len;return gif_play_right;
@@ -320,72 +322,82 @@ void loadPetState() {
 }
 
 // ==========================================
+// ==========================================
 // Drawing helpers (all target the framebuffer)
 // ==========================================
 void drawMeter(lgfx::LGFX_Sprite &g, int x, int y, int w, int h,
                int value, uint16_t color, const char *label) {
+    // Compact, sleek rounded pill meter
     g.setTextColor(color);
-    g.setTextSize(2);
-    g.setCursor(x, y - 2);
+    g.setTextSize(1);
+    g.setCursor(x, y + 1);
     g.print(label);
 
-    int barX = x + 16;
-    int barW = w - 16;
-    g.drawRect(barX, y + 1, barW, h, COLOR_BORDER);
-    g.fillRect(barX + 1, y + 2, barW - 2, h - 2, 0x2124);
+    int barX = x + 8;
+    int barW = w - 8;
+    g.fillRoundRect(barX, y, barW, h, h / 2, 0x31A6); // Soft dark slot
 
     int fillW = (value * (barW - 2)) / 100;
-    if (fillW > 0) g.fillRect(barX + 1, y + 2, fillW, h - 2, color);
+    if (fillW > 0) {
+        g.fillRoundRect(barX + 1, y + 1, max(3, fillW), h - 2, (h - 2) / 2, color);
+    }
 }
 
 void drawStatusBar(lgfx::LGFX_Sprite &g) {
-    g.fillRect(0, 0, LCD_WIDTH, 40, COLOR_PET_BG);
-    drawMeter(g, 4, 4, 112, 12, pet.hunger, COLOR_HUNGER, "H");
-    drawMeter(g, 124, 4, 112, 12, pet.cleanliness, COLOR_CLEAN, "C");
-    drawMeter(g, 4, 22, 112, 12, pet.happiness, COLOR_HAPPY, "P");
-    drawMeter(g, 124, 22, 112, 12, pet.energy, COLOR_ENERGY, "E");
+    // 1. Cute subtle cat ear tips at top corners so the screen naturally frames the character's head!
+    // Left ear (outer fur gray, inner soft pink)
+    g.fillTriangle(10, 16, 42, 16, 26, 2, 0x632C);
+    g.fillTriangle(14, 15, 38, 15, 26, 5, 0xFBB8);
+    // Right ear
+    g.fillTriangle(198, 16, 230, 16, 214, 2, 0x632C);
+    g.fillTriangle(202, 15, 226, 15, 214, 5, 0xFBB8);
+
+    // 2. Four sleek, compact floating meters centered between the ears (Y: 5 to 13, taking only 8px height!)
+    drawMeter(g, 48, 5, 34, 8, pet.hunger, COLOR_HUNGER, "H");
+    drawMeter(g, 84, 5, 34, 8, pet.cleanliness, COLOR_CLEAN, "C");
+    drawMeter(g, 120, 5, 34, 8, pet.happiness, COLOR_HAPPY, "P");
+    drawMeter(g, 156, 5, 34, 8, pet.energy, COLOR_ENERGY, "E");
 }
 
 void drawFooter(lgfx::LGFX_Sprite &g) {
-    g.fillRect(0, 200, LCD_WIDTH, 40, COLOR_PET_BG);
     if (mode != MODE_PET) return;
 
     static const char *labels[4] = {"FEED", "WASH", "PLAY", nullptr};
     const char *sleepLabel = pet.isSleeping ? "WAKE" : "ZZZ";
     uint16_t colors[4] = {COLOR_HUNGER, COLOR_CLEAN, COLOR_HAPPY, COLOR_ENERGY};
 
+    // Sleek minimal floating pill buttons at the very bottom (Y: 226 to 238)
     for (int i = 0; i < 4; i++) {
-        int bx = 6 + i * 59;
+        int bx = 4 + i * 59;
+        g.fillRoundRect(bx, 226, 55, 12, 3, 0x2124);
         g.setTextColor(colors[i]);
-        g.setTextSize(2);
-        g.setCursor(bx, 214);
+        g.setTextSize(1);
+        g.setCursor(bx + 4, 228);
         g.print(i + 1);
 
-        g.setTextColor(COLOR_BLACK);
-        g.setTextSize(1);
-        g.setCursor(bx + 14, 222);
+        g.setTextColor(COLOR_WHITE);
+        g.setCursor(bx + 14, 228);
         g.print(i == 3 ? sleepLabel : labels[i]);
     }
 }
 
 void drawSpeechBubble(lgfx::LGFX_Sprite &g, unsigned long now) {
-    g.fillRect(4, 192, LCD_WIDTH - 8, 8, COLOR_PET_BG);
     if (now >= pet.statusMsgEndTime || pet.statusMsg[0] == '\0') return;
 
     int textWidth = (int)strlen(pet.statusMsg) * 6;
     int tx = max(4, (LCD_WIDTH - textWidth) / 2);
+    // Draw directly below Kekusis's mouth (Y: 206 to 218) in crisp black text
     g.setTextColor(COLOR_BLACK);
     g.setTextSize(1);
-    g.setCursor(tx, 192);
+    g.setCursor(tx, 206);
     g.print(pet.statusMsg);
 }
 
 void drawGameHeader(lgfx::LGFX_Sprite &g, uint16_t color, const char *text) {
-    g.fillRect(0, 0, LCD_WIDTH, 36, COLOR_BG);
-    g.drawFastHLine(0, 36, LCD_WIDTH, COLOR_BORDER);
+    // Pure text on fur background — no dark box, no dividing lines!
     g.setTextColor(color);
     g.setTextSize(2);
-    g.setCursor(22, 2);
+    g.setCursor(20, 4);
     g.print(text);
 }
 
@@ -447,14 +459,13 @@ void drawPlayArrows(lgfx::LGFX_Sprite &g) {
 }
 
 void drawPlayScore(lgfx::LGFX_Sprite &g) {
-    g.fillRect(10, 205, 220, 26, COLOR_PET_BG);
     g.setTextColor(COLOR_BLACK);
     g.setTextSize(2);
-    g.setCursor(20, 210);
+    g.setCursor(20, 212);
     g.printf("SCORE: %d / 3", play.score);
     if (play.celebrating || play.nextRoundAt != 0) {
         g.setTextSize(1);
-        g.setCursor(166, 214);
+        g.setCursor(166, 216);
         g.print(play.celebrating ? "YAY!" : "MISS!");
     }
 }
@@ -472,9 +483,9 @@ void render(unsigned long now) {
 
         case MODE_GAME_FEED:
             drawGameHeader(scene, COLOR_HUNGER, "FEED KEKUSIS!");
-            scene.setTextColor(COLOR_HUNGER);
+            scene.setTextColor(COLOR_BLACK);
             scene.setTextSize(2);
-            scene.setCursor(48, 20);
+            scene.setCursor(48, 22);
             scene.printf("SCORE: %d / 8", feed.score);
             gifLayer.draw(petDrawX, petDrawY);
             drawTreat(scene);
@@ -482,9 +493,9 @@ void render(unsigned long now) {
 
         case MODE_GAME_WASH:
             drawGameHeader(scene, COLOR_CLEAN, "WASH KEKUSIS!");
-            scene.setTextColor(COLOR_CLEAN);
+            scene.setTextColor(COLOR_BLACK);
             scene.setTextSize(2);
-            scene.setCursor(48, 20);
+            scene.setCursor(48, 22);
             scene.printf("SCRUB: %d / 6", wash.score);
             gifLayer.draw(petDrawX, petDrawY);
             drawSoapSpots(scene);
@@ -602,6 +613,8 @@ int petDrawLane() {
 void handleFeedInput(int button) {
     if (button < 0 || button > 3) return;
     petDrawX = laneX[button] - PET_GIF_W / 2;
+    render(millis());
+    lastRenderAt = millis();
     Serial.printf("-> Kekusis moved to Lane %d!\n", button + 1);
 }
 
@@ -730,7 +743,8 @@ void handlePlayInput(int button) {
 void handleButtonPress(int button) {
     static unsigned long lastPress[4] = {0, 0, 0, 0};
     unsigned long now = millis();
-    if (now - lastPress[button] < 120) return;
+    unsigned long minInterval = (mode == MODE_GAME_FEED) ? 35 : 100;
+    if (now - lastPress[button] < minInterval) return;
     lastPress[button] = now;
 
     Serial.printf("[INPUT] Button %d triggered\n", button + 1);
@@ -774,11 +788,18 @@ void handleButtonPress(int button) {
 void pollButtons(unsigned long now) {
     for (int i = 0; i < 4; i++) {
         int reading = digitalRead(buttons[i].pin);
-        if (reading != buttons[i].lastState) buttons[i].lastChange = now;
-        if (now - buttons[i].lastChange > BTN_DEBOUNCE_MS &&
-            reading != buttons[i].currentState) {
-            buttons[i].currentState = reading;
-            if (reading == LOW) handleButtonPress(i);
+        // Instant leading-edge debounce: zero latency on button press
+        if (reading == LOW && buttons[i].currentState == HIGH) {
+            if (now - buttons[i].lastChange >= 20) {
+                buttons[i].currentState = LOW;
+                buttons[i].lastChange = now;
+                handleButtonPress(i);
+            }
+        } else if (reading == HIGH && buttons[i].currentState == LOW) {
+            if (now - buttons[i].lastChange >= 20) {
+                buttons[i].currentState = HIGH;
+                buttons[i].lastChange = now;
+            }
         }
         buttons[i].lastState = reading;
     }
@@ -790,7 +811,7 @@ void pollButtons(unsigned long now) {
 void printPetStatus() {
     static const char *names[] = {
         "IDLE", "HAPPY", "HUNGRY", "DIRTY", "EATING",
-        "WASHING", "SLEEPING", "PLAYING"
+        "WASHING", "SLEEPING", "SLEEPY", "SQUINT", "PLAYING"
     };
     Serial.printf("\n[PET STATUS] Kekusis -> Hunger: %d%% | Clean: %d%% | "
                   "Happy: %d%% | Energy: %d%% | Mood: %s | Sleeping: %s\n",
@@ -818,6 +839,8 @@ PetEmotion emotionFromName(const String &name) {
     if (name == "dirty") return EMOTION_DIRTY;
     if (name == "eating" || name == "eat") return EMOTION_EATING;
     if (name == "sleeping" || name == "sleep") return EMOTION_SLEEPING;
+    if (name == "sleepy") return EMOTION_SLEEPY;
+    if (name == "squint") return EMOTION_SQUINT;
     if (name == "washing" || name == "wash") return EMOTION_WASHING;
     if (name == "playing" || name == "play") return EMOTION_PLAYING;
     return EMOTION_IDLE;
