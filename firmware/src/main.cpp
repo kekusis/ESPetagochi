@@ -650,18 +650,12 @@ void render(unsigned long now) {
             drawSpeechBubble(scene, now);
             drawFooter(scene);
 
-            // Subtle ambient particle effects for life & polish:
+            // Sleeping ambient Z particles:
             if (pet.isSleeping) {
                 static unsigned long lastSleepZ = 0;
                 if (now - lastSleepZ >= 1500) {
                     lastSleepZ = now;
                     spawnParticle(145 + random(15), 85, 0.35f + (float)random(20)/100.0f, -0.6f, COLOR_CLEAN, 1, 45, 3);
-                }
-            } else if (pet.happiness > 65) {
-                static unsigned long lastHappyHeart = 0;
-                if (now - lastHappyHeart >= 3600) {
-                    lastHappyHeart = now;
-                    spawnParticle(120 + random(-25, 25), 105, (float)random(-25, 25)/100.0f, -0.65f, 0xFBB8, 1, 38, 2);
                 }
             }
             break;
@@ -748,6 +742,9 @@ void updateFeedGame(unsigned long now) {
 
     if (!feed.active && feed.spawned < 8 && now >= feed.nextSpawnAt) {
         feed.active = true;
+        if (gifLayer.emotion() != EMOTION_IDLE) {
+            gifLayer.open(EMOTION_IDLE);
+        }
         int offset = 1 + random(3);
         feed.lane = (feed.lane < 0) ? random(4) : (feed.lane + offset) % 4;
         feed.x = laneX[feed.lane];
@@ -778,8 +775,8 @@ void updateFeedGame(unsigned long now) {
         feed.score++;
         pet.hunger = min(HUNGER_MAX, pet.hunger + 14);
         pet.happiness = min(HAPPINESS_MAX, pet.happiness + 8);
-        pet.triggerEmotionOverride(EMOTION_HAPPY, 450);
-        gifLayer.open(EMOTION_HAPPY);
+        pet.triggerEmotionOverride(EMOTION_EATING, 500);
+        gifLayer.open(EMOTION_EATING);
         feed.nextSpawnAt = now + 160;
         // Sparkle crumbs & hearts burst on delicious catch!
         spawnBurst(feed.x, 145, COLOR_ENERGY, 12, 0, 3.2f);
