@@ -376,13 +376,47 @@ void drawFooter(lgfx::LGFX_Sprite &g) {
 void drawSpeechBubble(lgfx::LGFX_Sprite &g, unsigned long now) {
     if (now >= pet.statusMsgEndTime || pet.statusMsg[0] == '\0') return;
 
-    int textWidth = (int)strlen(pet.statusMsg) * 6;
-    int tx = max(4, (LCD_WIDTH - textWidth) / 2);
-    // Draw directly below Kekusis's mouth (Y: 206 to 218) in crisp black text
     g.setTextColor(COLOR_BLACK);
-    g.setTextSize(1);
-    g.setCursor(tx, 206);
-    g.print(pet.statusMsg);
+    g.setTextSize(2); // 2x larger: 12x16 font, easily readable!
+
+    int len = (int)strlen(pet.statusMsg);
+    // If short enough to fit on one line (<= 19 chars -> <= 228px on 240px screen)
+    if (len <= 19) {
+        int tx = max(2, (LCD_WIDTH - len * 12) / 2);
+        g.setCursor(tx, 206);
+        g.print(pet.statusMsg);
+        return;
+    }
+
+    // Split across two lines at the best space near the midpoint
+    int mid = len / 2;
+    int splitIdx = -1;
+    for (int d = 0; d < len / 2; d++) {
+        if (mid + d < len && pet.statusMsg[mid + d] == ' ') { splitIdx = mid + d; break; }
+        if (mid - d >= 0 && pet.statusMsg[mid - d] == ' ') { splitIdx = mid - d; break; }
+    }
+    if (splitIdx <= 0 || splitIdx >= len - 1) {
+        splitIdx = 18;
+    }
+
+    char line1[32];
+    char line2[32];
+    int l1 = min(splitIdx, 31);
+    strncpy(line1, pet.statusMsg, l1);
+    line1[l1] = '\0';
+
+    const char *p2 = pet.statusMsg + splitIdx;
+    while (*p2 == ' ') p2++;
+    strncpy(line2, p2, sizeof(line2) - 1);
+    line2[sizeof(line2) - 1] = '\0';
+
+    int tx1 = max(2, (LCD_WIDTH - (int)strlen(line1) * 12) / 2);
+    int tx2 = max(2, (LCD_WIDTH - (int)strlen(line2) * 12) / 2);
+
+    g.setCursor(tx1, 190);
+    g.print(line1);
+    g.setCursor(tx2, 208);
+    g.print(line2);
 }
 
 void drawGameHeader(lgfx::LGFX_Sprite &g, uint16_t color, const char *text) {
@@ -394,15 +428,110 @@ void drawGameHeader(lgfx::LGFX_Sprite &g, uint16_t color, const char *text) {
 }
 
 void drawTreat(lgfx::LGFX_Sprite &g) {
-    if (!feed.active || feed.y < 42) return;
+    if (!feed.active || feed.y < 20) return;
     int type = constrain(feed.type, 0, NUM_TREAT_TYPES - 1);
     const uint16_t *sprite = (const uint16_t *)pgm_read_ptr(&treat_sprites[type]);
-    // Treat sprites bake in the fur-gray background. Treat it as a chroma key
-    // so falling food shows the animated pet behind it instead of a gray box.
-    g.pushImage(feed.x - TREAT_SPRITE_W / 2,
-                feed.y - TREAT_SPRITE_H / 2,
-                TREAT_SPRITE_W, TREAT_SPRITE_H, sprite,
-                (uint16_t)COLOR_TREAT_BG);
+    // 32x32 pixel art rendered 1.5x larger on the display (48x48) with fur-color chroma key
+    g.pushImageRotateZoom(feed.x, feed.y,
+                          TREAT_SPRITE_W / 2.0f, TREAT_SPRITE_H / 2.0f,
+                          0.0f, 1.5f, 1.5f,
+                          TREAT_SPRITE_W, TREAT_SPRITE_H,
+                          sprite, (uint16_t)COLOR_TREAT_BG);
+}
+
+// ==========================================
+// Particle & Visual Polish Effect System
+// ==========================================
+struct Particle {
+    float x, y;
+    float vx, vy;
+    uint16_t color;
+    uint8_t size;
+    uint8_t life;
+    uint8_t maxLife;
+    uint8_t shape; // 0: Star sparkle, 1: Bubble splash ring, 2: Heart, 3: Sleep Z
+};
+
+static const int MAX_PARTICLES = 40;
+static Particle particles[MAX_PARTICLES];
+
+void spawnParticle(float x, float y, float vx, float vy, uint16_t color, uint8_t size, uint8_t life, uint8_t shape) {
+    for (int i = 0; i < MAX_PARTICLES; i++) {
+        if (particles[i].life == 0) {
+            particles[i].x = x;
+            particles[i].y = y;
+            particles[i].vx = vx;
+            particles[i].vy = vy;
+            particles[i].color = color;
+            particles[i].size = size;
+            particles[i].life = life;
+            particles[i].maxLife = life;
+            particles[i].shape = shape;
+            return;
+        }
+    }
+}
+
+void spawnBurst(float x, float y, uint16_t color, int count, uint8_t shape, float maxSpeed = 3.0f) {
+    for (int i = 0; i < count; i++) {
+        float angle = ((float)random(360)) * (3.14159f / 180.0f);
+        float speed = 0.8f + ((float)random(100) / 100.0f) * maxSpeed;
+        float vx = cosf(angle) * speed;
+        float vy = sinf(angle) * speed - 0.7f; // slight upward lift
+        uint8_t life = 14 + random(12);
+        uint8_t size = 2 + random(3);
+        spawnParticle(x, y, vx, vy, color, size, life, shape);
+    }
+}
+
+void updateAndDrawParticles(lgfx::LGFX_Sprite &g) {
+    for (int i = 0; i < MAX_PARTICLES; i++) {
+        if (particles[i].life == 0) continue;
+
+        Particle &p = particles[i];
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += 0.08f; // gentle gravity
+        p.vx *= 0.94f; // soft air drag
+        p.life--;
+
+        int px = (int)p.x;
+        int py = (int)p.y;
+        if (px < 0 || px >= LCD_WIDTH || py < 0 || py >= LCD_HEIGHT) {
+            p.life = 0;
+            continue;
+        }
+
+        switch (p.shape) {
+            case 0: { // Star sparkle (+)
+                int s = (p.life > p.maxLife / 2) ? p.size : max(1, p.size - 1);
+                g.fillRect(px - s, py, s * 2 + 1, 1, p.color);
+                g.fillRect(px, py - s, 1, s * 2 + 1, p.color);
+                g.drawPixel(px, py, COLOR_WHITE);
+                break;
+            }
+            case 1: { // Bubble droplet / ring
+                int r = p.size;
+                g.drawCircle(px, py, r, p.color);
+                g.drawPixel(px - 1, py - 1, COLOR_WHITE);
+                break;
+            }
+            case 2: { // Heart (<3)
+                g.fillCircle(px - 2, py - 1, 2, p.color);
+                g.fillCircle(px + 2, py - 1, 2, p.color);
+                g.fillTriangle(px - 4, py, px + 4, py, px, py + 4, p.color);
+                g.drawPixel(px - 1, py - 2, COLOR_WHITE);
+                break;
+            }
+            case 3: { // Sleep Z
+                g.setTextColor(p.color);
+                g.setTextSize(1);
+                g.setCursor(px, py);
+                g.print("z");
+                break;
+            }
+        }
+    }
 }
 
 void drawSoapSpots(lgfx::LGFX_Sprite &g) {
@@ -421,9 +550,14 @@ void drawWashBubble(lgfx::LGFX_Sprite &g, unsigned long now) {
     int cx = wash.bubbleX;
     int cy = wash.bubbleY;
 
-    g.drawCircle(cx, cy, 18, COLOR_BUBBLE_RIM);
-    g.fillCircle(cx, cy, 16, COLOR_SOAP);
-    g.fillCircle(cx - 5, cy - 5, 3, COLOR_WHITE);
+    // Organic shimmering pulse animation
+    int pulse = (int)(sinf((float)now * 0.009f) * 2.0f);
+    int r = 18 + pulse;
+
+    g.drawCircle(cx, cy, r, COLOR_BUBBLE_RIM);
+    g.fillCircle(cx, cy, r - 2, COLOR_SOAP);
+    g.fillCircle(cx - 5, cy - 5, 3, COLOR_WHITE); // gloss highlight
+    g.drawCircle(cx, cy, r - 2, COLOR_SOAP_HI);
 
     g.setTextColor(COLOR_WHITE);
     g.setTextSize(2);
@@ -431,22 +565,66 @@ void drawWashBubble(lgfx::LGFX_Sprite &g, unsigned long now) {
     g.print(wash.bubbleButton + 1);
 
     if (now < wash.wrongUntil) {
-        g.drawCircle(cx, cy, 21, COLOR_RED);
+        g.drawCircle(cx, cy, r + 3, COLOR_RED);
+        g.drawCircle(cx, cy, r + 4, COLOR_RED);
     }
 }
 
 void drawPlayArrows(lgfx::LGFX_Sprite &g) {
     if (play.celebrating || play.nextRoundAt != 0) return;
-    // Outline-only arrows: the animated character shows through the arrow
-    // instead of being covered by a solid shape on the fur-gray background.
+
+    // Arcade bounce animation inviting the player to hit the button
+    int bounce = (millis() / 65) % 8;
+    if (bounce > 4) bounce = 8 - bounce; // bounces 0, 1, 2, 3, 4, 3, 2, 1...
+
     if (play.targetDirection == 0) {
-        g.drawTriangle(8, 108, 38, 86, 38, 130, COLOR_HAPPY);
-        g.drawTriangle(9, 108, 37, 88, 37, 128, COLOR_HAPPY);
-        g.drawRect(38, 98, 14, 20, COLOR_HAPPY);
+        // LEFT ARROW (Button 1): Solid filled vibrant arrow pointing LEFT
+        int tipX = 8 - bounce;
+        int baseY = 108;
+        // Triangle head pointing left
+        g.fillTriangle(tipX, baseY, tipX + 30, baseY - 26, tipX + 30, baseY + 26, COLOR_HAPPY);
+        // Shaft extending to the right
+        g.fillRect(tipX + 30, baseY - 12, 20, 25, COLOR_HAPPY);
+
+        // Bold dark outline
+        g.drawTriangle(tipX, baseY, tipX + 30, baseY - 26, tipX + 30, baseY + 26, COLOR_BLACK);
+        g.drawRect(tipX + 30, baseY - 12, 20, 25, COLOR_BLACK);
+        // Remove dividing line between triangle and shaft
+        g.drawFastVLine(tipX + 30, baseY - 11, 23, COLOR_HAPPY);
+
+        // Crisp white 3D highlight edge along top
+        g.drawLine(tipX + 3, baseY, tipX + 28, baseY - 23, COLOR_WHITE);
+        g.drawFastHLine(tipX + 31, baseY - 10, 17, COLOR_WHITE);
+
+        // Indicator "[1]"
+        g.setTextColor(COLOR_BLACK);
+        g.setTextSize(1);
+        g.setCursor(tipX + 34, baseY - 3);
+        g.print("[1]");
     } else {
-        g.drawTriangle(232, 108, 202, 86, 202, 130, COLOR_HAPPY);
-        g.drawTriangle(231, 108, 203, 88, 203, 128, COLOR_HAPPY);
-        g.drawRect(188, 98, 14, 20, COLOR_HAPPY);
+        // RIGHT ARROW (Button 2): Solid filled vibrant arrow pointing RIGHT
+        int tipX = 232 + bounce;
+        int baseY = 108;
+        // Triangle head pointing right
+        g.fillTriangle(tipX, baseY, tipX - 30, baseY - 26, tipX - 30, baseY + 26, COLOR_HAPPY);
+        // Shaft extending to the left
+        g.fillRect(tipX - 50, baseY - 12, 20, 25, COLOR_HAPPY);
+
+        // Bold dark outline
+        g.drawTriangle(tipX, baseY, tipX - 30, baseY - 26, tipX - 30, baseY + 26, COLOR_BLACK);
+        g.drawRect(tipX - 50, baseY - 12, 20, 25, COLOR_BLACK);
+        // Remove dividing line between triangle and shaft
+        g.drawFastVLine(tipX - 30, baseY - 11, 23, COLOR_HAPPY);
+
+        // Crisp white 3D highlight edge along top
+        g.drawLine(tipX - 3, baseY, tipX - 28, baseY - 23, COLOR_WHITE);
+        g.drawFastHLine(tipX - 48, baseY - 10, 17, COLOR_WHITE);
+
+        // Indicator "[2]"
+        g.setTextColor(COLOR_BLACK);
+        g.setTextSize(1);
+        g.setCursor(tipX - 48, baseY - 3);
+        g.print("[2]");
     }
 }
 
@@ -471,6 +649,21 @@ void render(unsigned long now) {
             gifLayer.draw(petDrawX, petDrawY);
             drawSpeechBubble(scene, now);
             drawFooter(scene);
+
+            // Subtle ambient particle effects for life & polish:
+            if (pet.isSleeping) {
+                static unsigned long lastSleepZ = 0;
+                if (now - lastSleepZ >= 1500) {
+                    lastSleepZ = now;
+                    spawnParticle(145 + random(15), 85, 0.35f + (float)random(20)/100.0f, -0.6f, COLOR_CLEAN, 1, 45, 3);
+                }
+            } else if (pet.happiness > 65) {
+                static unsigned long lastHappyHeart = 0;
+                if (now - lastHappyHeart >= 3600) {
+                    lastHappyHeart = now;
+                    spawnParticle(120 + random(-25, 25), 105, (float)random(-25, 25)/100.0f, -0.65f, 0xFBB8, 1, 38, 2);
+                }
+            }
             break;
 
         case MODE_GAME_FEED:
@@ -501,6 +694,9 @@ void render(unsigned long now) {
             drawPlayScore(scene);
             break;
     }
+
+    // Dynamic particles & effects rendered smoothly over scene
+    updateAndDrawParticles(scene);
 
     // One atomic update: the panel never sees a partially composed frame.
     scene.pushSprite(0, 0);
@@ -585,6 +781,9 @@ void updateFeedGame(unsigned long now) {
         pet.triggerEmotionOverride(EMOTION_HAPPY, 450);
         gifLayer.open(EMOTION_HAPPY);
         feed.nextSpawnAt = now + 160;
+        // Sparkle crumbs & hearts burst on delicious catch!
+        spawnBurst(feed.x, 145, COLOR_ENERGY, 12, 0, 3.2f);
+        spawnBurst(feed.x, 138, 0xFBB8, 6, 2, 1.8f);
         Serial.printf("-> YUM! Caught in Lane %d! Score: %d/%d\n",
                       feed.lane + 1, feed.score, 8);
     } else if (feed.y > 180) {
@@ -647,6 +846,7 @@ void handleWashInput(int button) {
 
     if (button != wash.bubbleButton) {
         wash.wrongUntil = millis() + 140;
+        spawnBurst(wash.bubbleX, wash.bubbleY, COLOR_RED, 8, 0, 2.0f);
         Serial.printf("-> WRONG! Need button %d, got %d\n",
                       wash.bubbleButton + 1, button + 1);
         return;
@@ -658,6 +858,10 @@ void handleWashInput(int button) {
     wash.spots[wash.currentBubble].y = wash.bubbleY;
     wash.spots[wash.currentBubble].active = true;
     wash.currentBubble++;
+
+    // Soapy bubble splash and glimmer droplets!
+    spawnBurst(wash.bubbleX, wash.bubbleY, COLOR_SOAP, 14, 1, 3.4f);
+    spawnBurst(wash.bubbleX, wash.bubbleY, COLOR_SOAP_HI, 8, 0, 2.2f);
 
     Serial.printf("-> POPPED Bubble %d! (btn %d) (%d/%d done)\n",
                   wash.currentBubble, button + 1, wash.score, 6);
@@ -722,9 +926,14 @@ void handlePlayInput(int button) {
         play.celebrating = true;
         play.celebrateUntil = millis() + 450;
         gifLayer.open(EMOTION_HAPPY);
+        int ax = (button == 0) ? 28 : 212;
+        spawnBurst(ax, 108, COLOR_HAPPY, 14, 0, 3.6f);
+        spawnBurst(ax, 108, COLOR_ENERGY, 8, 2, 2.0f);
         Serial.printf("-> MATCH! Score: %d/3\n", play.score);
     } else {
         play.nextRoundAt = millis() + 500;
+        int ax = (button == 0) ? 28 : 212;
+        spawnBurst(ax, 108, COLOR_RED, 8, 0, 2.2f);
         Serial.println("-> MISMATCH! Wrong direction.");
     }
 }
