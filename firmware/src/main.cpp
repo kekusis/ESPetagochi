@@ -344,19 +344,11 @@ void drawMeter(lgfx::LGFX_Sprite &g, int x, int y, int w, int h,
 }
 
 void drawStatusBar(lgfx::LGFX_Sprite &g) {
-    // 1. Cute subtle cat ear tips at top corners so the screen naturally frames the character's head!
-    // Left ear (outer fur gray, inner soft pink)
-    g.fillTriangle(10, 16, 42, 16, 26, 2, 0x632C);
-    g.fillTriangle(14, 15, 38, 15, 26, 5, 0xFBB8);
-    // Right ear
-    g.fillTriangle(198, 16, 230, 16, 214, 2, 0x632C);
-    g.fillTriangle(202, 15, 226, 15, 214, 5, 0xFBB8);
-
-    // 2. Four sleek, compact floating meters centered between the ears (Y: 5 to 13, taking only 8px height!)
-    drawMeter(g, 48, 5, 34, 8, pet.hunger, COLOR_HUNGER, "H");
-    drawMeter(g, 84, 5, 34, 8, pet.cleanliness, COLOR_CLEAN, "C");
-    drawMeter(g, 120, 5, 34, 8, pet.happiness, COLOR_HAPPY, "P");
-    drawMeter(g, 156, 5, 34, 8, pet.energy, COLOR_ENERGY, "E");
+    // Four sleek, compact floating meters centered across the top
+    drawMeter(g, 16, 6, 46, 8, pet.hunger, COLOR_HUNGER, "H");
+    drawMeter(g, 70, 6, 46, 8, pet.cleanliness, COLOR_CLEAN, "C");
+    drawMeter(g, 124, 6, 46, 8, pet.happiness, COLOR_HAPPY, "P");
+    drawMeter(g, 178, 6, 46, 8, pet.energy, COLOR_ENERGY, "E");
 }
 
 void drawFooter(lgfx::LGFX_Sprite &g) {
