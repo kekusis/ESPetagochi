@@ -10,6 +10,9 @@
 #include "pet_gifs.h"
 #include "treat_sprites.h"
 #include "PetState.h"
+#include "Buzzer.h"
+
+BuzzerManager buzzer(PIN_BUZZER);
 
 // ==========================================
 // Framebuffer renderer
@@ -778,6 +781,7 @@ void updateFeedGame(unsigned long now) {
         pet.triggerEmotionOverride(EMOTION_EATING, 500);
         gifLayer.open(EMOTION_EATING);
         feed.nextSpawnAt = now + 160;
+        buzzer.play(SND_FEED_CATCH);
         // Sparkle crumbs & hearts burst on delicious catch!
         spawnBurst(feed.x, 145, COLOR_ENERGY, 12, 0, 3.2f);
         spawnBurst(feed.x, 138, 0xFBB8, 6, 2, 1.8f);
@@ -843,6 +847,7 @@ void handleWashInput(int button) {
 
     if (button != wash.bubbleButton) {
         wash.wrongUntil = millis() + 140;
+        buzzer.play(SND_WASH_WRONG);
         spawnBurst(wash.bubbleX, wash.bubbleY, COLOR_RED, 8, 0, 2.0f);
         Serial.printf("-> WRONG! Need button %d, got %d\n",
                       wash.bubbleButton + 1, button + 1);
@@ -855,6 +860,7 @@ void handleWashInput(int button) {
     wash.spots[wash.currentBubble].y = wash.bubbleY;
     wash.spots[wash.currentBubble].active = true;
     wash.currentBubble++;
+    buzzer.play(SND_WASH_POP);
 
     // Soapy bubble splash and glimmer droplets!
     spawnBurst(wash.bubbleX, wash.bubbleY, COLOR_SOAP, 14, 1, 3.4f);
@@ -923,12 +929,14 @@ void handlePlayInput(int button) {
         play.celebrating = true;
         play.celebrateUntil = millis() + 450;
         gifLayer.open(EMOTION_HAPPY);
+        buzzer.play(SND_MATCH_WIN);
         int ax = (button == 0) ? 28 : 212;
         spawnBurst(ax, 108, COLOR_HAPPY, 14, 0, 3.6f);
         spawnBurst(ax, 108, COLOR_ENERGY, 8, 2, 2.0f);
         Serial.printf("-> MATCH! Score: %d/3\n", play.score);
     } else {
         play.nextRoundAt = millis() + 500;
+        buzzer.play(SND_MATCH_MISS);
         int ax = (button == 0) ? 28 : 212;
         spawnBurst(ax, 108, COLOR_RED, 8, 0, 2.2f);
         Serial.println("-> MISMATCH! Wrong direction.");
@@ -962,22 +970,32 @@ void handleButtonPress(int button) {
 
     switch (button) {
         case 0:
+            buzzer.play(SND_BTN);
             if (pet.isSleeping) pet.setStatus("Kekusis is asleep!", 2000);
             else startFeedGame();
             break;
         case 1:
+            buzzer.play(SND_BTN);
             if (pet.isSleeping) pet.setStatus("Don't splash water!", 2000);
             else startWashGame();
             break;
         case 2:
-            if (pet.isSleeping) pet.setStatus("Shh! Kekusis is napping.", 2000);
-            else if (pet.energy < 15) pet.setStatus("Too tired to play!", 2500);
-            else startPlayGame();
+            if (pet.isSleeping) {
+                buzzer.play(SND_BTN);
+                pet.setStatus("Shh! Kekusis is napping.", 2000);
+            } else if (pet.energy < 15) {
+                buzzer.play(SND_ALERT);
+                pet.setStatus("Too tired to play!", 2500);
+            } else {
+                buzzer.play(SND_BTN);
+                startPlayGame();
+            }
             break;
         case 3:
             pet.isSleeping = !pet.isSleeping;
             pet.setStatus(pet.isSleeping ? "Goodnight! Zzz..." : "Good morning!",
                           pet.isSleeping ? 3000 : 2500);
+            buzzer.play(pet.isSleeping ? SND_SLEEP : SND_WAKE);
             savePetState();
             break;
     }
@@ -1027,6 +1045,9 @@ void printHelp() {
     Serial.println("  set <stat> <0-100>       : hunger|clean|happy|energy");
     Serial.println("  set stats <h> <c> <p> <e>");
     Serial.println("  TIME <epoch>             : Sync real-world clock");
+    Serial.println("  sound on|off             : Enable/disable buzzer");
+    Serial.println("  buzzer <sfx>             : Play: btn catch pop wrong win miss sleep wake pet alert");
+    Serial.println("  buzzer pin <gpio>        : Change buzzer GPIO pin");
     Serial.println("  save | help              : Save state / show this help");
     Serial.println("==================================================");
 }
@@ -1124,6 +1145,33 @@ void handleSerialCommands() {
             pet.energy = constrain(cmd.substring(11).toInt(), 0, 100);
             savePetState();
         }
+        else if (cmd.startsWith("sound ")) {
+            String arg = cmd.substring(6);
+            arg.trim();
+            buzzer.setEnabled(arg.equalsIgnoreCase("on"));
+            Serial.printf("[BUZZER] Sound %s\n", buzzer.isEnabled() ? "ON" : "OFF");
+        }
+        else if (cmd.startsWith("buzzer pin ")) {
+            int pin = cmd.substring(11).toInt();
+            buzzer.setPin(pin);
+            Serial.printf("[BUZZER] Pin set to %d\n", pin);
+        }
+        else if (cmd.startsWith("buzzer ")) {
+            String sfx = cmd.substring(7);
+            sfx.trim();
+            sfx.toLowerCase();
+            if      (sfx == "btn")    buzzer.play(SND_BTN);
+            else if (sfx == "catch")  buzzer.play(SND_FEED_CATCH);
+            else if (sfx == "pop")    buzzer.play(SND_WASH_POP);
+            else if (sfx == "wrong")  buzzer.play(SND_WASH_WRONG);
+            else if (sfx == "win")    buzzer.play(SND_MATCH_WIN);
+            else if (sfx == "miss")   buzzer.play(SND_MATCH_MISS);
+            else if (sfx == "sleep")  buzzer.play(SND_SLEEP);
+            else if (sfx == "wake")   buzzer.play(SND_WAKE);
+            else if (sfx == "pet")    buzzer.play(SND_PET);
+            else if (sfx == "alert")  buzzer.play(SND_ALERT);
+            else Serial.printf("[BUZZER] Unknown sfx: %s\n", sfx.c_str());
+        }
         else {
             Serial.printf("Unknown command: '%s'. Type 'help' for options.\n", cmd.c_str());
         }
@@ -1142,6 +1190,7 @@ void setup() {
     Serial.println("==========================================");
 
     for (int i = 0; i < 4; i++) pinMode(buttons[i].pin, INPUT_PULLUP);
+    buzzer.begin();
 
     lcd.init();
     lcd.setRotation(0);
@@ -1169,6 +1218,7 @@ void setup() {
 void loop() {
     unsigned long now = millis();
 
+    buzzer.update(now);
     handleSerialCommands();
     pollButtons(now);
 

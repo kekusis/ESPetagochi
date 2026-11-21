@@ -33,6 +33,12 @@
 #define BTN_DEBOUNCE_MS 50
 
 // ==========================================
+// Buzzer / Piezo Audio Configuration
+// Passive piezo buzzer on PWM pin (set to -1 to disable hardware output)
+// ==========================================
+#define PIN_BUZZER    5   // Configurable GPIO pin for passive piezo buzzer
+
+// ==========================================
 // Pet Mechanics Configuration
 // ==========================================
 #define HUNGER_MAX       100

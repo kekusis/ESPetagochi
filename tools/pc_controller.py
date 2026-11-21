@@ -14,9 +14,16 @@ Features:
 import sys
 import time
 import threading
+import queue
 import re
 import serial
 import serial.tools.list_ports
+
+try:
+    import winsound
+    HAS_WINSOUND = True
+except ImportError:
+    HAS_WINSOUND = False
 
 try:
     import tkinter as tk
@@ -24,10 +31,33 @@ try:
     HAS_TK = True
 except ImportError:
     HAS_TK = False
-except ImportError:
-    HAS_TK = False
 
 DEFAULT_BAUD = 115200
+
+# Background sound player thread for non-blocking buzzer emulation
+sound_queue = queue.Queue()
+
+def sound_player_loop():
+    while True:
+        try:
+            item = sound_queue.get()
+            if item is None:
+                break
+            freq, duration, enabled = item
+            if enabled and HAS_WINSOUND and freq > 0:
+                try:
+                    c_freq = max(37, min(32767, int(freq)))
+                    winsound.Beep(c_freq, max(1, int(duration)))
+                except Exception:
+                    pass
+            elif enabled and freq == 0 and duration > 0:
+                time.sleep(duration / 1000.0)
+        except Exception:
+            pass
+        finally:
+            sound_queue.task_done()
+
+threading.Thread(target=sound_player_loop, daemon=True).start()
 
 def find_esp_port():
     ports = list(serial.tools.list_ports.comports())
@@ -116,7 +146,7 @@ class SerialController:
 def launch_gui(port_name):
     root = tk.Tk()
     root.title(f"Kekusis Controller & Debugger ({port_name})")
-    root.geometry("520x840")
+    root.geometry("520x920")
     root.configure(bg="#0f172a")
     root.resizable(False, True)
 
@@ -128,6 +158,10 @@ def launch_gui(port_name):
     energy_var = tk.IntVar(value=100)
     mood_var = tk.StringVar(value="IDLE")
     log_text = None
+    buzzer_sound_enabled = tk.BooleanVar(value=True)
+    buzzer_indicator_var = tk.StringVar(value="♪ Buzzer: Idle")
+    buzzer_flash_timer = [None]
+    buzzer_indicator_lbl = None
 
     def parse_status_line(text):
         # [PET STATUS] Kekusis -> Hunger: 99% | Clean: 83% | Happy: 100% | Energy: 80% | Mood: IDLE
@@ -147,6 +181,23 @@ def launch_gui(port_name):
                 parse_status_line(text)
             elif "Stats updated" in text or "set to" in text:
                 controller.send_command("status")
+
+            m_snd = re.search(r"\[SND\]\s+(\d+)\s+(\d+)", text)
+            if m_snd:
+                freq = int(m_snd.group(1))
+                dur = int(m_snd.group(2))
+                if buzzer_sound_enabled.get():
+                    sound_queue.put((freq, dur, True))
+                if buzzer_indicator_lbl is not None:
+                    if freq > 0:
+                        buzzer_indicator_var.set(f"♪ {freq}Hz ({dur}ms)")
+                        buzzer_indicator_lbl.config(fg="#4ade80")
+                    else:
+                        buzzer_indicator_var.set(f"♪ Rest ({dur}ms)")
+                        buzzer_indicator_lbl.config(fg="#38bdf8")
+                    if buzzer_flash_timer[0] is not None:
+                        root.after_cancel(buzzer_flash_timer[0])
+                    buzzer_flash_timer[0] = root.after(350, lambda: buzzer_indicator_lbl.config(fg="#94a3b8") if buzzer_indicator_lbl else None)
                 
             if log_text is not None:
                 try:
@@ -331,16 +382,74 @@ def launch_gui(port_name):
     for c in range(5):
         anim_frame.columnconfigure(c, weight=1)
 
-    # SECTION 4: Serial Monitor & Command Input
-    sec4 = tk.LabelFrame(root, text=" 🖥️ SERIAL MONITOR ", font=("Segoe UI", 9, "bold"),
-                         fg="#cbd5e1", bg="#0f172a", bd=1, relief="groove")
-    sec4.pack(fill="both", expand=True, padx=16, pady=(6, 12))
+    # SECTION 4: Buzzer Emulator
+    sec4_bz = tk.LabelFrame(root, text=" 🔊 BUZZER EMULATOR & SOUND EFFECTS ", font=("Segoe UI", 9, "bold"),
+                            fg="#cbd5e1", bg="#0f172a", bd=1, relief="groove")
+    sec4_bz.pack(fill="x", padx=16, pady=6)
 
-    log_text = scrolledtext.ScrolledText(sec4, bg="#020617", fg="#38bdf8", font=("Consolas", 8), height=7, takefocus=0)
+    bz_top = tk.Frame(sec4_bz, bg="#0f172a")
+    bz_top.pack(fill="x", padx=8, pady=(4, 4))
+
+    cb_pc_audio = tk.Checkbutton(bz_top, text="PC Audio (winsound)", variable=buzzer_sound_enabled,
+                                 font=("Segoe UI", 8, "bold"), fg="#38bdf8", bg="#0f172a", selectcolor="#1e293b",
+                                 activebackground="#0f172a", activeforeground="#38bdf8")
+    cb_pc_audio.pack(side="left")
+
+    def toggle_esp_sound():
+        nonlocal esp_sound_on
+        esp_sound_on = not esp_sound_on
+        controller.send_command(f"sound {'on' if esp_sound_on else 'off'}")
+        btn_esp_mute.config(text=f"ESP Buzzer: {'ON' if esp_sound_on else 'OFF'}",
+                            fg="#4ade80" if esp_sound_on else "#f87171")
+
+    esp_sound_on = True
+    btn_esp_mute = tk.Button(bz_top, text="ESP Buzzer: ON", font=("Segoe UI", 8, "bold"),
+                             bg="#1e293b", fg="#4ade80", bd=0, padx=6, pady=2, cursor="hand2",
+                             command=toggle_esp_sound)
+    btn_esp_mute.pack(side="left", padx=8)
+
+    buzzer_indicator_lbl = tk.Label(bz_top, textvariable=buzzer_indicator_var, font=("Segoe UI", 8, "bold"),
+                                    fg="#94a3b8", bg="#1e293b", padx=8, pady=2, relief="solid", bd=1)
+    buzzer_indicator_lbl.pack(side="right")
+
+    # SFX Button Grid (2 rows of 5)
+    sfx_frame = tk.Frame(sec4_bz, bg="#0f172a")
+    sfx_frame.pack(fill="x", padx=8, pady=(2, 6))
+
+    sfx_list = [
+        ("🔘 Click", "btn", "#334155"),
+        ("🍎 Catch", "catch", "#b91c1c"),
+        ("🫧 Pop", "pop", "#0369a1"),
+        ("❌ Wrong", "wrong", "#7f1d1d"),
+        ("🏆 Win", "win", "#15803d"),
+        ("💔 Miss", "miss", "#581c87"),
+        ("💤 Sleep", "sleep", "#4338ca"),
+        ("☀️ Wake", "wake", "#c26d05"),
+        ("🐱 Pet", "pet", "#be185d"),
+        ("⚠️ Alert", "alert", "#b45309"),
+    ]
+
+    for idx, (label, sfx_id, col) in enumerate(sfx_list):
+        r = idx // 5
+        c = idx % 5
+        sb = tk.Button(sfx_frame, text=label, font=("Segoe UI", 8, "bold"), bg=col, fg="white",
+                       bd=0, padx=2, pady=4, cursor="hand2",
+                       command=lambda s=sfx_id: controller.send_command(f"buzzer {s}"))
+        sb.grid(row=r, column=c, padx=2, pady=2, sticky="nsew")
+
+    for c in range(5):
+        sfx_frame.columnconfigure(c, weight=1)
+
+    # SECTION 5: Serial Monitor & Command Input
+    sec5 = tk.LabelFrame(root, text=" 🖥️ SERIAL MONITOR ", font=("Segoe UI", 9, "bold"),
+                         fg="#cbd5e1", bg="#0f172a", bd=1, relief="groove")
+    sec5.pack(fill="both", expand=True, padx=16, pady=(6, 12))
+
+    log_text = scrolledtext.ScrolledText(sec5, bg="#020617", fg="#38bdf8", font=("Consolas", 8), height=7, takefocus=0)
     log_text.pack(fill="both", expand=True, padx=8, pady=(6, 4))
     log_text.config(state="disabled")
 
-    cmd_frame = tk.Frame(sec4, bg="#0f172a")
+    cmd_frame = tk.Frame(sec5, bg="#0f172a")
     cmd_frame.pack(fill="x", padx=8, pady=(0, 6))
 
     cmd_entry = tk.Entry(cmd_frame, bg="#1e293b", fg="white", font=("Segoe UI", 9), insertbackground="white", bd=0)
@@ -379,9 +488,17 @@ def launch_cli(port_name):
     print("  set hunger <0-100> | set clean <0-100> | set happy <0-100> | set energy <0-100>")
     print("  set stats <h> <c> <p> <e>")
     print("  anim <idle|happy|hungry|dirty|eating|sleeping|washing|playing>")
-    print("  status | feed | wash | play | sleep | quit\n")
+    print("  buzzer <btn|catch|pop|wrong|win|miss|sleep|wake|pet|alert>")
+    print("  sound on|off | status | feed | wash | play | sleep | quit\n")
 
-    controller = SerialController(port_name)
+    def cli_on_rx(line):
+        m = re.search(r"\[SND\]\s+(\d+)\s+(\d+)", line)
+        if m:
+            freq, dur = int(m.group(1)), int(m.group(2))
+            sound_queue.put((freq, dur, True))
+        print(line, end="")
+
+    controller = SerialController(port_name, on_receive_callback=cli_on_rx)
 
     try:
         while True:
