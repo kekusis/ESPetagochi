@@ -24,10 +24,10 @@
 // Hardware Button Pins (Configurable)
 // Active LOW (internal pullups enabled)
 // ==========================================
-#define PIN_BTN_FEED   1   // Button 1: Feed / Snack Minigame
-#define PIN_BTN_WASH   2   // Button 2: Wash / Bubble Scrub Minigame
-#define PIN_BTN_PLAY   3   // Button 3: Play / Reaction Minigame
-#define PIN_BTN_SLEEP  4   // Button 4: Sleep / Lights / Menu Toggle
+#define PIN_BTN_FEED   14  // Button 1: Feed / Snack Minigame (Lane 1)
+#define PIN_BTN_WASH   13  // Button 2: Wash / Bubble Scrub Minigame (Lane 2)
+#define PIN_BTN_PLAY   12  // Button 3: Play / Reaction Minigame (Lane 3)
+#define PIN_BTN_SLEEP  11  // Button 4: Sleep / Lights / Menu Toggle (Lane 4)
 
 // Debounce time in milliseconds
 #define BTN_DEBOUNCE_MS 50

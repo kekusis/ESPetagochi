@@ -1190,6 +1190,8 @@ void setup() {
     Serial.println("==========================================");
 
     for (int i = 0; i < 4; i++) pinMode(buttons[i].pin, INPUT_PULLUP);
+    Serial.printf("[BUTTONS] Active LOW: [1]=GPIO%d [2]=GPIO%d [3]=GPIO%d [4]=GPIO%d\n",
+                  buttons[0].pin, buttons[1].pin, buttons[2].pin, buttons[3].pin);
     buzzer.begin();
 
     lcd.init();
