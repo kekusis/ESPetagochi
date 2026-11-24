@@ -1046,6 +1046,7 @@ void printHelp() {
     Serial.println("  set stats <h> <c> <p> <e>");
     Serial.println("  TIME <epoch>             : Sync real-world clock");
     Serial.println("  sound on|off             : Enable/disable buzzer");
+    Serial.println("  buttons | test buttons   : Check button pin states");
     Serial.println("  buzzer <sfx>             : Play: btn catch pop wrong win miss sleep wake pet alert");
     Serial.println("  buzzer pin <gpio>        : Change buzzer GPIO pin");
     Serial.println("  save | help              : Save state / show this help");
@@ -1171,6 +1172,32 @@ void handleSerialCommands() {
             else if (sfx == "pet")    buzzer.play(SND_PET);
             else if (sfx == "alert")  buzzer.play(SND_ALERT);
             else Serial.printf("[BUZZER] Unknown sfx: %s\n", sfx.c_str());
+        }
+        else if (cmd.equalsIgnoreCase("buttons") || cmd.equalsIgnoreCase("btns")) {
+            Serial.printf("[BUTTONS RAW] [1/GPIO%d]=%s [2/GPIO%d]=%s [3/GPIO%d]=%s [4/GPIO%d]=%s\n",
+                          buttons[0].pin, digitalRead(buttons[0].pin) == LOW ? "LOW(PRESSED)" : "HIGH(IDLE)",
+                          buttons[1].pin, digitalRead(buttons[1].pin) == LOW ? "LOW(PRESSED)" : "HIGH(IDLE)",
+                          buttons[2].pin, digitalRead(buttons[2].pin) == LOW ? "LOW(PRESSED)" : "HIGH(IDLE)",
+                          buttons[3].pin, digitalRead(buttons[3].pin) == LOW ? "LOW(PRESSED)" : "HIGH(IDLE)");
+        }
+        else if (cmd.equalsIgnoreCase("test buttons") || cmd.equalsIgnoreCase("test btns")) {
+            Serial.println("--- MONITORING BUTTON PINS FOR 5 SECONDS (press buttons now) ---");
+            unsigned long start = millis();
+            int lastR[4] = {-1, -1, -1, -1};
+            while (millis() - start < 5000) {
+                bool changed = false;
+                int r[4];
+                for (int i = 0; i < 4; i++) {
+                    r[i] = digitalRead(buttons[i].pin);
+                    if (r[i] != lastR[i]) changed = true;
+                }
+                if (changed) {
+                    for (int i = 0; i < 4; i++) lastR[i] = r[i];
+                    Serial.printf("RAW PINS: [14]=%d [13]=%d [12]=%d [11]=%d\n", r[0], r[1], r[2], r[3]);
+                }
+                delay(20);
+            }
+            Serial.println("--- BUTTON MONITOR FINISHED ---");
         }
         else {
             Serial.printf("Unknown command: '%s'. Type 'help' for options.\n", cmd.c_str());
